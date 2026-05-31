@@ -61,16 +61,26 @@ class AMapProvider {
         const currentPoint = this._currentPoint(convertedRoute, frameTimeMs, durationMs);
 
         for (const widget of context.map_widgets) {
+            const isMovingMap = widget.type === 'moving_map';
+            const widgetWidth = Math.max(1, Math.round(widget.width * scaleX));
+            const widgetHeight = Math.max(1, Math.round(widget.height * scaleY));
+            const mapSize = isMovingMap ? Math.max(widgetWidth, widgetHeight, this._movingBackingSize(widgetWidth, widgetHeight)) : null;
             const widgetEl = document.createElement('div');
             widgetEl.className = 'amap-widget';
             widgetEl.style.left = `${Math.round(widget.x * scaleX)}px`;
             widgetEl.style.top = `${Math.round(widget.y * scaleY)}px`;
-            widgetEl.style.width = `${Math.max(1, Math.round(widget.width * scaleX))}px`;
-            widgetEl.style.height = `${Math.max(1, Math.round(widget.height * scaleY))}px`;
+            widgetEl.style.width = `${widgetWidth}px`;
+            widgetEl.style.height = `${widgetHeight}px`;
             widgetEl.style.borderRadius = `${Math.max(0, Math.round((widget.corner_radius || 0) * scaleX))}px`;
 
             const mapEl = document.createElement('div');
             mapEl.className = 'amap-widget-map';
+            if (isMovingMap) {
+                mapEl.style.width = `${mapSize}px`;
+                mapEl.style.height = `${mapSize}px`;
+                mapEl.style.left = `${Math.round((widgetWidth - mapSize) / 2)}px`;
+                mapEl.style.top = `${Math.round((widgetHeight - mapSize) / 2)}px`;
+            }
             widgetEl.appendChild(mapEl);
             layer.appendChild(widgetEl);
 
@@ -83,7 +93,7 @@ class AMapProvider {
             });
 
             const overlays = [];
-            if (convertedRoute.length > 1) {
+            if (!isMovingMap && convertedRoute.length > 1) {
                 const polyline = new AMap.Polyline({
                     path: convertedRoute,
                     showDir: false,
@@ -109,7 +119,7 @@ class AMapProvider {
             }
 
             if (widget.type === 'journey_map' && overlays.length > 0) {
-                map.setFitView(overlays, false, [16, 16, 16, 16]);
+                map.setFitView(overlays, false, [0, 0, 0, 0]);
             } else if (currentPoint) {
                 map.setCenter(currentPoint);
                 map.setZoom(widget.zoom || 16);
@@ -277,6 +287,10 @@ class AMapProvider {
         if (!durationMs || durationMs <= 0) return route[Math.floor(route.length / 2)];
         const ratio = Math.max(0, Math.min(1, frameTimeMs / durationMs));
         return route[Math.min(route.length - 1, Math.round(ratio * (route.length - 1)))];
+    }
+
+    _movingBackingSize(width, height) {
+        return Math.floor(Math.sqrt((width ** 2) + (height ** 2)));
     }
 }
 

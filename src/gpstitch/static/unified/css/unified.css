@@ -596,8 +596,22 @@ body {
 }
 
 .amap-widget-map {
+    position: absolute;
+    left: 0;
+    top: 0;
     width: 100%;
     height: 100%;
+}
+
+.amap-widget-map .amap-logo,
+.amap-widget-map .amap-copyright,
+.amap-widget-map .amap-mcode,
+.amap-widget-map .amap-scalecontrol,
+.amap-widget-map .amap-controlbar {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
 }
 
 .amap-current-marker {

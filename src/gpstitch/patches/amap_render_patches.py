@@ -33,26 +33,36 @@ def patch_amap_jsapi_rendering() -> None:
             *,
             at,
             location,
+            azimuth,
             size: int,
             zoom: int,
             corner_radius: int,
             opacity: float,
+            rotate: bool,
         ) -> None:
             self.at = at
             self.location = location
+            self.azimuth = azimuth
             self.size = size
             self.zoom = zoom
+            self.rotate = rotate
             self.border = MaybeRoundedBorder(size=size, corner_radius=corner_radius, opacity=opacity)
 
         def draw(self, image: Image.Image, draw: ImageDraw.ImageDraw) -> None:
             location = self.location()
             if not _valid_location(location):
                 return
+            rotation_degrees = None
+            azimuth = self.azimuth()
+            if azimuth and self.rotate:
+                azi = azimuth.to("degree").magnitude
+                rotation_degrees = 0 + azi if azi >= 0 else 360 + azi
             frame = renderer.render_moving(
                 lat=location.lat,
                 lon=location.lon,
                 size=self.size,
                 zoom=self.zoom,
+                rotation_degrees=rotation_degrees,
             )
             image.alpha_composite(self.border.rounded(frame), self.at.tuple())
 
@@ -123,10 +133,12 @@ def patch_amap_jsapi_rendering() -> None:
         return AMapMovingMapWidget(
             at=layout_xml_module.at(element),
             location=lambda: entry().point,
+            azimuth=lambda: entry().azi,
             size=layout_xml_module.iattrib(element, "size", d=256),
             zoom=layout_xml_module.iattrib(element, "zoom", d=16, r=range(1, 20)),
             corner_radius=layout_xml_module.iattrib(element, "corner_radius", 0),
             opacity=layout_xml_module.fattrib(element, "opacity", 0.7, r=layout_xml_module.FloatRange(0.0, 1.0)),
+            rotate=layout_xml_module.battrib(element, "rotate", d=True),
         )
 
     def create_journey_map(self, element, entry, **kwargs):

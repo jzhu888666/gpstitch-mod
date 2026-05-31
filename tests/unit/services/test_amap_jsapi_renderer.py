@@ -1,5 +1,6 @@
 """Tests for backend AMap JSAPI snapshot rendering helpers."""
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -56,6 +57,7 @@ def test_render_journey_uses_preconverted_amap_points(monkeypatch, tmp_path):
     assert captured["options"]["kind"] == "journey-base"
     assert "current" not in captured["options"]
     assert captured["options"]["drawMarker"] is False
+    assert captured["options"]["fitPadding"] == [0, 0, 0, 0]
     assert captured["options"]["route"][0] == pytest.approx(
         {"lat": 29.695315106096245, "lng": 92.22754311668311}
     )
@@ -79,16 +81,29 @@ def test_render_moving_uses_quantized_base_without_browser_marker(monkeypatch, t
 
     def fake_render(options):
         captured.append(options)
-        return AMapSnapshot(Image.new("RGBA", (256, 256), (255, 255, 255, 255)), {})
+        return AMapSnapshot(Image.new("RGBA", (options["size"], options["size"]), (255, 255, 255, 255)), {})
 
     monkeypatch.setattr(renderer, "_render_cached_snapshot", fake_render)
 
     image = renderer.render_moving(lat=29.698164997988393, lon=92.22652316093446, size=256, zoom=17)
 
     assert captured[0]["kind"] == "moving-base"
+    assert captured[0]["size"] == int(math.sqrt((256**2) * 2))
     assert captured[0]["drawMarker"] is False
     assert "current" not in captured[0]
+    assert image.size == (256, 256)
     assert _has_blue_marker_near_center(image)
+
+
+def test_renderer_html_hides_amap_attribution():
+    from gpstitch.services.amap_jsapi_renderer import _renderer_html
+
+    html = _renderer_html(SimpleNamespace(key="test-key", security_js_code="test-security"))
+
+    assert ".amap-logo" in html
+    assert ".amap-copyright" in html
+    assert "display: none !important" in html
+    assert "map.setFitView(overlays, false, fitPadding)" in html
 
 
 def test_close_moving_points_share_quantized_center():

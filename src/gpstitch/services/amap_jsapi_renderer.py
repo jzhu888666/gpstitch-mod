@@ -88,14 +88,17 @@ class AMapJSAPISnapshotRenderer:
         lon: float,
         size: int,
         zoom: int,
+        rotation_degrees: float | None = None,
         marker_fill: tuple[int, int, int] = (0, 0, 255),
         marker_outline: tuple[int, int, int] = (0, 0, 0),
     ) -> Image.Image:
         current = _to_amap_point(lat, lon)
+        output_size = int(size)
+        render_size = _moving_backing_size(output_size)
         center = _quantize_point(current, int(zoom), MOVING_MAP_GRID_PIXELS)
         options = {
             "kind": "moving-base",
-            "size": int(size),
+            "size": render_size,
             "zoom": int(zoom),
             "center": center,
             "route": [],
@@ -103,9 +106,12 @@ class AMapJSAPISnapshotRenderer:
         }
         snapshot = self._render_cached_snapshot(options)
         frame = snapshot.image.copy()
-        marker_xy = _project_point(current, center, int(zoom), int(size))
-        _draw_marker(frame, marker_xy, marker_fill, marker_outline)
-        return frame
+        marker_xy = _project_point(current, center, int(zoom), render_size)
+        frame = _center_image_on_point(frame, marker_xy)
+        _draw_marker(frame, _image_center(frame), marker_fill, marker_outline)
+        if rotation_degrees is not None:
+            frame = frame.rotate(float(rotation_degrees) % 360, resample=Image.BILINEAR)
+        return _center_crop(frame, output_size)
 
     def render_journey(
         self,
@@ -127,6 +133,7 @@ class AMapJSAPISnapshotRenderer:
             "route": [_to_amap_point(lat, lon) for lat, lon in route],
             "lineFill": _rgb(line_fill),
             "lineWidth": int(line_width),
+            "fitPadding": [0, 0, 0, 0],
             "drawMarker": False,
         }
         snapshot = self._render_cached_snapshot(options)
@@ -249,7 +256,7 @@ class AMapJSAPISnapshotRenderer:
     def _cache_key(self, options: dict[str, Any]) -> str:
         payload = {
             "version": AMAP_JSAPI_VERSION,
-            "renderer": "gcj02-local-marker-cache-v1",
+            "renderer": "gcj02-local-marker-scale-v2",
             "fingerprint": self.runtime_config.key_fingerprint,
             "options": options,
         }
@@ -267,6 +274,16 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
   <meta charset="utf-8">
   <style>
     html, body, #map {{ margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }}
+    .amap-logo,
+    .amap-copyright,
+    .amap-mcode,
+    .amap-scalecontrol,
+    .amap-controlbar {{
+      display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }}
     .amap-current-marker {{
       display: block;
       width: 14px;
@@ -388,7 +405,8 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
         }}
 
         if (String(options.kind || '').startsWith('journey') && overlays.length > 0) {{
-          map.setFitView(overlays, false, [16, 16, 16, 16]);
+          const fitPadding = Array.isArray(options.fitPadding) ? options.fitPadding : [0, 0, 0, 0];
+          map.setFitView(overlays, false, fitPadding);
         }} else if (current) {{
           map.setCenter(current);
           map.setZoom(options.zoom || 16);
@@ -427,6 +445,47 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _moving_backing_size(size: int) -> int:
+    return int(math.sqrt((int(size) ** 2) * 2))
+
+
+def _center_crop(image: Image.Image, size: int) -> Image.Image:
+    size = int(size)
+    if image.size == (size, size):
+        return image
+    if image.width < size or image.height < size:
+        padded = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        padded.alpha_composite(image, ((size - image.width) // 2, (size - image.height) // 2))
+        return padded
+    left = round((image.width - size) / 2)
+    top = round((image.height - size) / 2)
+    return image.crop((left, top, left + size, top + size))
+
+
+def _center_image_on_point(image: Image.Image, point: tuple[int, int]) -> Image.Image:
+    center = _image_center(image)
+    dx = center[0] - int(point[0])
+    dy = center[1] - int(point[1])
+    if dx == 0 and dy == 0:
+        return image
+
+    shifted = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    src_left = max(0, -dx)
+    src_top = max(0, -dy)
+    src_right = min(image.width, image.width - dx)
+    src_bottom = min(image.height, image.height - dy)
+    if src_left < src_right and src_top < src_bottom:
+        shifted.alpha_composite(
+            image.crop((src_left, src_top, src_right, src_bottom)),
+            (max(0, dx), max(0, dy)),
+        )
+    return shifted
+
+
+def _image_center(image: Image.Image) -> tuple[int, int]:
+    return (round(image.width / 2), round(image.height / 2))
 
 
 def _sample_route(route: list[tuple[float, float]], limit: int) -> list[tuple[float, float]]:
