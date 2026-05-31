@@ -1,5 +1,7 @@
 """Map cache API endpoints."""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 
 from gpstitch.models.schemas import MapCacheWarmupRequest, MapCacheWarmupResponse
@@ -14,7 +16,8 @@ async def warm_map_cache(request: MapCacheWarmupRequest) -> MapCacheWarmupRespon
     """Warm project-local map cache for the active session."""
     if not file_manager.session_exists(request.session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-    return map_cache_service.warm_session_cache(
+    return await asyncio.to_thread(
+        map_cache_service.warm_session_cache,
         session_id=request.session_id,
         map_style=request.map_style,
         language=request.language,
