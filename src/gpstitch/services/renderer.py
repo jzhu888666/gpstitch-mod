@@ -73,7 +73,7 @@ DEFAULT_LAYOUT_TRANSLATIONS = {
 
 DEFAULT_OSD_BASE_WIDTH = 1920
 DEFAULT_OSD_SCALE_ATTR = "gpstitch_osd_scale"
-DEFAULT_OSD_SCALE_VERSION = "v6"
+DEFAULT_OSD_SCALE_VERSION = "v7"
 DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
 DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
 DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
@@ -493,15 +493,19 @@ def _position_default_osd_root_widgets(root: ET.Element, layout: str, scale: flo
         _set_int_attr(big_mph, "y", height - 280 * scale)
 
     bottom_row_y = height - 100 * scale
-    for name, x in (("altitude", 16), ("gradient", 220), ("gradient_chart", 400)):
+    for name, x in (("altitude", 16), ("gradient", 220)):
         elem = _find_root_layout_child(root, name)
         if elem is not None:
             _set_int_attr(elem, "x", x * scale)
             _set_int_attr(elem, "y", bottom_row_y)
+    chart = _find_root_layout_child(root, "gradient_chart")
+    if chart is not None:
+        _set_int_attr(chart, "x", 400 * scale)
+        _set_int_attr(chart, "y", bottom_row_y + 24 * scale)
     chart_label = _find_root_layout_child(root, "gradient_chart_label")
     if chart_label is not None:
         _set_int_attr(chart_label, "x", 400 * scale)
-        _set_int_attr(chart_label, "y", bottom_row_y - 24 * scale)
+        _set_int_attr(chart_label, "y", bottom_row_y)
 
     moving_map = _find_root_layout_child(root, "moving_map")
     journey_map = _find_root_layout_child(root, "journey_map")

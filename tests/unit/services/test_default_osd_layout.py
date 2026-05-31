@@ -34,12 +34,13 @@ def test_default_4k_osd_layout_scales_text_and_local_spacing(temp_dir, monkeypat
     speed_group = root.find("./composite[@name='big_mph']")
     altitude_group = root.find("./composite[@name='altitude']")
     gradient_group = root.find("./composite[@name='gradient']")
+    gradient_chart = root.find("./component[@name='gradient_chart']")
     moving_map = root.find("./component[@name='moving_map']")
     journey_map = root.find("./component[@name='journey_map']")
     chart_label = root.find("./component[@name='gradient_chart_label']")
     datetime_components = root.findall("./composite[@name='date_and_time']/component[@type='datetime']")
 
-    assert root.attrib["gpstitch_osd_scale"] == "v6:2"
+    assert root.attrib["gpstitch_osd_scale"] == "v7:2"
     assert len(datetime_components) == 3
     assert datetime_components[0].attrib["format"] == "%Y/%m/%d"
     assert datetime_components[0].attrib["timezone"] == "source"
@@ -59,9 +60,10 @@ def test_default_4k_osd_layout_scales_text_and_local_spacing(temp_dir, monkeypat
     assert speed_group.attrib["y"] == "1600"
     assert altitude_group.attrib["y"] == "1960"
     assert gradient_group.attrib["y"] == "1960"
+    assert gradient_chart.attrib["y"] == "2008"
     assert chart_label.text == "ALT CHANGE"
     assert chart_label.attrib["x"] == "800"
-    assert chart_label.attrib["y"] == "1912"
+    assert chart_label.attrib["y"] == "1960"
     assert chart_label.attrib["size"] == "32"
     assert root.find(".//component[@type='metric_unit'][@metric='speed']").attrib["size"] == "32"
     assert root.find(".//component[@type='text']").attrib["size"] == "32"
