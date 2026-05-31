@@ -24,16 +24,28 @@ def test_default_4k_osd_layout_scales_text_and_local_spacing(temp_dir, monkeypat
     root = ET.parse(path).getroot()
 
     speed_metric = root.find(".//component[@type='metric'][@metric='speed']")
+    speed_group = root.find("./composite[@name='big_mph']")
+    altitude_group = root.find("./composite[@name='altitude']")
+    gradient_group = root.find("./composite[@name='gradient']")
+    moving_map = root.find("./component[@name='moving_map']")
+    journey_map = root.find("./component[@name='journey_map']")
 
-    assert root.attrib["gpstitch_osd_scale"] == "v2:2"
+    assert root.attrib["gpstitch_osd_scale"] == "v3:2"
     assert speed_metric.attrib["size"] == "320"
     assert speed_metric.attrib["x"] == "0"
     assert speed_metric.attrib["y"] == "0"
+    assert speed_group.attrib["y"] == "1600"
+    assert altitude_group.attrib["y"] == "1960"
+    assert gradient_group.attrib["y"] == "1960"
     assert root.find(".//component[@type='metric_unit'][@metric='speed']").attrib["size"] == "32"
     assert root.find(".//component[@type='text']").attrib["size"] == "32"
     assert root.find(".//component[@type='metric'][@metric='lat']").attrib["x"] == "236"
     assert root.find(".//component[@type='metric'][@metric='lat']").attrib["y"] == "48"
     assert root.find(".//component[@type='icon']").attrib["size"] == "128"
+    assert moving_map.attrib["x"] == "3288"
+    assert moving_map.attrib["y"] == "200"
+    assert journey_map.attrib["x"] == "3288"
+    assert journey_map.attrib["y"] == "752"
 
 
 def test_custom_layout_path_is_not_rewritten(temp_dir):

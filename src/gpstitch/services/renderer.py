@@ -72,7 +72,7 @@ DEFAULT_LAYOUT_TRANSLATIONS = {
 
 DEFAULT_OSD_BASE_WIDTH = 1920
 DEFAULT_OSD_SCALE_ATTR = "gpstitch_osd_scale"
-DEFAULT_OSD_SCALE_VERSION = "v2"
+DEFAULT_OSD_SCALE_VERSION = "v3"
 DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
 DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
 DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
@@ -322,7 +322,7 @@ def _localized_default_layout_path(layout: str, language: str | None = None) -> 
     tree = ET.parse(source)
     root = tree.getroot()
     _remove_named_children(root, {"temperature", "cadence", "heartbeat"})
-    _scale_default_osd_layout(root, scale)
+    _scale_default_osd_layout(root, layout, scale)
     translations = DEFAULT_LAYOUT_TRANSLATIONS.get(lang, {})
     for elem in root.iter("component"):
         if elem.text:
@@ -351,7 +351,7 @@ def _default_layout_cache_is_current(target: Path, source: Path, scale: float) -
     return root.attrib.get(DEFAULT_OSD_SCALE_ATTR) == _format_default_osd_scale(scale)
 
 
-def _scale_default_osd_layout(root: ET.Element, scale: float) -> None:
+def _scale_default_osd_layout(root: ET.Element, layout: str, scale: float) -> None:
     root.set(DEFAULT_OSD_SCALE_ATTR, _format_default_osd_scale(scale))
     if scale <= 1.0:
         return
@@ -360,6 +360,7 @@ def _scale_default_osd_layout(root: ET.Element, scale: float) -> None:
         if child.attrib.get("name") not in DEFAULT_OSD_UNSCALED_ROOT_NAMES:
             _scale_numeric_attr(child, "x", scale)
         _scale_default_osd_subtree(child, scale, is_root=True)
+    _position_default_osd_root_widgets(root, layout, scale)
 
 
 def _scale_default_osd_subtree(elem: ET.Element, scale: float, *, is_root: bool = False) -> None:
@@ -394,6 +395,64 @@ def _scale_numeric_attr(elem: ET.Element, attr: str, scale: float) -> None:
         elif value < 0:
             scaled = min(-1, scaled)
     elem.set(attr, str(scaled))
+
+
+def _position_default_osd_root_widgets(root: ET.Element, layout: str, scale: float) -> None:
+    """Reflow root-level default OSD groups after fonts are scaled.
+
+    The upstream 4K default layout keeps the original 1080p text sizes but moves
+    root groups near the bottom/right edges. If we only enlarge the fonts, the
+    bigger speed and GPS labels overlap the altitude/gradient row and maps.
+    """
+    width, height = _parse_resolution(layout)
+
+    date_time = _find_root_layout_child(root, "date_and_time")
+    if date_time is not None:
+        _set_int_attr(date_time, "x", 260 * scale)
+        _set_int_attr(date_time, "y", 30 * scale)
+
+    big_mph = _find_root_layout_child(root, "big_mph")
+    if big_mph is not None:
+        _set_int_attr(big_mph, "x", 16 * scale)
+        _set_int_attr(big_mph, "y", height - 280 * scale)
+
+    bottom_row_y = height - 100 * scale
+    for name, x in (("altitude", 16), ("gradient", 220), ("gradient_chart", 400)):
+        elem = _find_root_layout_child(root, name)
+        if elem is not None:
+            _set_int_attr(elem, "x", x * scale)
+            _set_int_attr(elem, "y", bottom_row_y)
+
+    moving_map = _find_root_layout_child(root, "moving_map")
+    journey_map = _find_root_layout_child(root, "journey_map")
+    gps_info = _find_root_layout_child(root, "gps_info")
+    if moving_map is None:
+        return
+
+    map_size = int(moving_map.attrib.get("size", round(256 * scale)))
+    map_margin = 20 * scale
+    map_x = width - map_size - map_margin
+    map_y = 100 * scale
+
+    for elem in (moving_map, journey_map, gps_info):
+        if elem is not None:
+            _set_int_attr(elem, "x", map_x)
+    if gps_info is not None:
+        _set_int_attr(gps_info, "y", 0)
+    _set_int_attr(moving_map, "y", map_y)
+    if journey_map is not None:
+        _set_int_attr(journey_map, "y", map_y + map_size + map_margin)
+
+
+def _find_root_layout_child(root: ET.Element, name: str) -> ET.Element | None:
+    for child in root:
+        if child.attrib.get("name") == name:
+            return child
+    return None
+
+
+def _set_int_attr(elem: ET.Element, attr: str, value: float) -> None:
+    elem.set(attr, str(int(round(value))))
 
 
 def _remove_named_children(parent: ET.Element, names: set[str]) -> None:
