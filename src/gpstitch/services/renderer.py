@@ -70,6 +70,13 @@ DEFAULT_LAYOUT_TRANSLATIONS = {
     "en": {},
 }
 
+DEFAULT_OSD_BASE_WIDTH = 1920
+DEFAULT_OSD_SCALE_ATTR = "gpstitch_osd_scale"
+DEFAULT_OSD_SCALE_VERSION = "v2"
+DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
+DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
+DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
+
 
 # Shared font list for consistency between preview and CLI render
 _FONTS_TO_TRY = [
@@ -308,12 +315,14 @@ def _localized_default_layout_path(layout: str, language: str | None = None) -> 
     if not source.exists():
         raise ValueError(f"Layout '{layout}' not found in gopro_overlay package (looked for {source})")
 
-    if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
+    scale = _default_osd_scale_for_layout(layout)
+    if _default_layout_cache_is_current(target, source, scale):
         return target
 
     tree = ET.parse(source)
     root = tree.getroot()
     _remove_named_children(root, {"temperature", "cadence", "heartbeat"})
+    _scale_default_osd_layout(root, scale)
     translations = DEFAULT_LAYOUT_TRANSLATIONS.get(lang, {})
     for elem in root.iter("component"):
         if elem.text:
@@ -321,6 +330,70 @@ def _localized_default_layout_path(layout: str, language: str | None = None) -> 
 
     tree.write(target, encoding="utf-8", xml_declaration=False)
     return target
+
+
+def _default_osd_scale_for_layout(layout: str) -> float:
+    width, _height = _parse_resolution(layout)
+    return max(width / DEFAULT_OSD_BASE_WIDTH, 1.0)
+
+
+def _format_default_osd_scale(scale: float) -> str:
+    return f"{DEFAULT_OSD_SCALE_VERSION}:{scale:.4g}"
+
+
+def _default_layout_cache_is_current(target: Path, source: Path, scale: float) -> bool:
+    if not target.exists() or target.stat().st_mtime < source.stat().st_mtime:
+        return False
+    try:
+        root = ET.parse(target).getroot()
+    except (ET.ParseError, OSError):
+        return False
+    return root.attrib.get(DEFAULT_OSD_SCALE_ATTR) == _format_default_osd_scale(scale)
+
+
+def _scale_default_osd_layout(root: ET.Element, scale: float) -> None:
+    root.set(DEFAULT_OSD_SCALE_ATTR, _format_default_osd_scale(scale))
+    if scale <= 1.0:
+        return
+
+    for child in root:
+        if child.attrib.get("name") not in DEFAULT_OSD_UNSCALED_ROOT_NAMES:
+            _scale_numeric_attr(child, "x", scale)
+        _scale_default_osd_subtree(child, scale, is_root=True)
+
+
+def _scale_default_osd_subtree(elem: ET.Element, scale: float, *, is_root: bool = False) -> None:
+    if not is_root:
+        for attr in ("x", "y", "width", "height", "cr"):
+            _scale_numeric_attr(elem, attr, scale)
+
+    if elem.tag == "component":
+        component_type = elem.attrib.get("type")
+        if component_type in DEFAULT_OSD_TEXT_COMPONENT_TYPES:
+            _scale_numeric_attr(elem, "size", scale)
+            _scale_numeric_attr(elem, "outline_width", scale)
+        elif component_type in DEFAULT_OSD_ICON_COMPONENT_TYPES:
+            _scale_numeric_attr(elem, "size", scale)
+
+    for child in elem:
+        _scale_default_osd_subtree(child, scale)
+
+
+def _scale_numeric_attr(elem: ET.Element, attr: str, scale: float) -> None:
+    raw = elem.attrib.get(attr)
+    if raw is None:
+        return
+    try:
+        value = float(raw)
+    except ValueError:
+        return
+    scaled = int(round(value * scale))
+    if attr not in {"x", "y"}:
+        if value > 0:
+            scaled = max(1, scaled)
+        elif value < 0:
+            scaled = min(-1, scaled)
+    elem.set(attr, str(scaled))
 
 
 def _remove_named_children(parent: ET.Element, names: set[str]) -> None:
