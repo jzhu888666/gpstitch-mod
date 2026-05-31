@@ -768,6 +768,31 @@ class TestValidateCreationTime:
         assert result.correction_type == "exhaustive"
         assert result.tz_correction_hours == -7.0
 
+    def test_tz_correction_gpx_local_as_utc_uses_system_timezone(self):
+        """Video creation_time is real UTC, but GPX timestamps are local wall-clock marked UTC."""
+        gps_local_as_utc = (
+            datetime.datetime(2026, 5, 10, 7, 57, 33, tzinfo=datetime.UTC).timestamp(),
+            datetime.datetime(2026, 5, 10, 14, 11, 5, tzinfo=datetime.UTC).timestamp(),
+        )
+        creation_time_utc = datetime.datetime(2026, 5, 10, 3, 1, 44, tzinfo=datetime.UTC)
+        with (
+            patch("gpstitch.services.renderer._get_gps_time_range", return_value=gps_local_as_utc),
+            patch("gpstitch.services.renderer._get_system_tz_offset", return_value=datetime.timedelta(hours=8)),
+            patch("gpstitch.services.renderer.os.stat") as mock_stat,
+        ):
+            mock_stat.return_value.st_mtime = creation_time_utc.timestamp()
+            result = _validate_creation_time(
+                Path("/tmp/DJI_20260510110142_0034_D.MP4"),
+                creation_time_utc,
+                120.0,
+                Path("/tmp/05100757.GPX"),
+            )
+
+        assert result.time == datetime.datetime(2026, 5, 10, 11, 1, 44, tzinfo=datetime.UTC)
+        assert result.correction_type == "system-tz"
+        assert result.tz_correction_hours == 8.0
+        assert result.suggested_offset_seconds is None
+
     def test_tz_correction_wrong_gps_file_no_correction(self):
         """Wrong GPS file — offset too large (> 14h) or shifted doesn't overlap → no correction."""
         # GPS range is in Feb, creation_time in June — offset would be months, not hours

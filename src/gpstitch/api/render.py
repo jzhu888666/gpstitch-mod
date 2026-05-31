@@ -515,12 +515,25 @@ def _calculate_batch_odo_offset(
 
     Returns offset in meters, or None if creation time cannot be determined.
     """
-    from gpstitch.services.renderer import _extract_creation_time, calculate_odo_offset
+    from gpstitch.services.renderer import _extract_creation_time, _validate_creation_time, calculate_odo_offset
 
     creation_time = _extract_creation_time(video_path)
     if creation_time is None:
         logger.warning("Cannot determine creation time for %s, skipping odo offset", video_path)
         return None
+
+    video_duration_sec = 0.0
+    try:
+        from gopro_overlay.ffmpeg import FFMPEG
+        from gopro_overlay.ffmpeg_gopro import FFMPEGGoPro
+
+        recording = FFMPEGGoPro(FFMPEG()).find_recording(video_path)
+        video_duration_sec = recording.video.duration.millis() / 1000.0
+    except Exception as e:
+        logger.warning("Failed to get video duration for odo offset alignment: %s", e)
+
+    result = _validate_creation_time(video_path, creation_time, video_duration_sec, gpx_path)
+    creation_time = result.time
 
     if time_offset_seconds and video_time_alignment == "manual":
         creation_time = creation_time + datetime.timedelta(seconds=time_offset_seconds)

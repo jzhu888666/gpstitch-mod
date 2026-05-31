@@ -14,4 +14,6 @@ def test_nvgpu_profiles_are_cuda_nvenc_compatible():
     assert "h264_nvenc" in nvgpu["output"]
     assert nnvgpu["input"] == ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     assert "overlay_cuda" in nnvgpu["filter"]
+    assert "hwupload_cuda[overlay_stream]" in nnvgpu["filter"]
+    assert "hwupload[overlay_stream]" not in nnvgpu["filter"]
     assert "h264_nvenc" in nnvgpu["output"]

@@ -170,6 +170,48 @@ class TestKillProcessTree:
             await render_service._kill_process_tree()
 
 
+class TestFfmpegOutputDiagnostics:
+    """Tests for surfacing the FFmpeg stderr file written by gopro_overlay."""
+
+    def test_read_ffmpeg_output_tail(self, tmp_path):
+        from gpstitch.services.render_service import RenderService
+
+        ffmpeg_log = tmp_path / "ffmpeg.txt"
+        ffmpeg_log.write_text(
+            "\n".join(
+                [
+                    "frame setup",
+                    "[hwupload @ 000001] A hardware device reference is required to upload frames to.",
+                    "[AVFilterGraph @ 000002] Error initializing filters",
+                    "Error : Invalid argument",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        lines = RenderService._read_ffmpeg_output_tail(
+            [
+                "Generating overlay",
+                f"FFMPEG Output is in {ffmpeg_log}",
+                "OSError: [Errno 22] Invalid argument",
+            ],
+            max_lines=3,
+        )
+
+        assert lines == [
+            "ffmpeg: [hwupload @ 000001] A hardware device reference is required to upload frames to.",
+            "ffmpeg: [AVFilterGraph @ 000002] Error initializing filters",
+            "ffmpeg: Error : Invalid argument",
+        ]
+
+    def test_read_ffmpeg_output_tail_missing_file(self, tmp_path):
+        from gpstitch.services.render_service import RenderService
+
+        missing = tmp_path / "missing.txt"
+
+        assert RenderService._read_ffmpeg_output_tail([f"FFMPEG Output is in {missing}"]) == []
+
+
 class TestResolveMtimeForAlignment:
     """Tests for _resolve_mtime_for_alignment method."""
 

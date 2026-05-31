@@ -7,7 +7,7 @@ without modifying the original library. Changes include:
 - NVIDIA FFmpeg profile correction for CUDA/NVENC
 - DJI camera metrics support (metric_accessor patch, always applied)
 - Project-local map tile cache support
-- Locale-independent GPX XML decoding on Windows
+- Locale-independent GPX/layout XML decoding on Windows
 - DJI SRT→GPX load bypass (gpx_patches, applied conditionally via wrapper
   when --ts-srt-source is present — preserves camera metrics in video render)
 """
@@ -35,6 +35,7 @@ def apply_patches() -> None:
     from gpstitch.patches.ffmpeg_overlay_patches import patch_ffmpeg_overlay
     from gpstitch.patches.ffmpeg_profile_patches import patch_ffmpeg_profiles
     from gpstitch.patches.gpx_encoding_patches import patch_gpx_file_encoding
+    from gpstitch.patches.layout_encoding_patches import patch_layout_xml_encoding
     from gpstitch.patches.map_cache_patches import patch_map_renderer_cache_dir
     from gpstitch.patches.metric_patches import patch_metric_accessor
 
@@ -42,6 +43,7 @@ def apply_patches() -> None:
     patch_ffmpeg_overlay()
     patch_ffmpeg_profiles()
     patch_gpx_file_encoding()
+    patch_layout_xml_encoding()
     patch_map_renderer_cache_dir()
     patch_metric_accessor()
 

@@ -25,11 +25,11 @@ GPX_WITH_NON_ASCII = f"""<?xml version="1.0" encoding="UTF-8"?>
 
 def test_decode_prefers_utf8_before_system_encoding(monkeypatch):
     """UTF-8 GPX bytes should decode even when the Windows locale is GBK."""
-    from gpstitch.patches import gpx_encoding_patches
+    from gpstitch.patches import xml_encoding
 
-    monkeypatch.setattr(gpx_encoding_patches.locale, "getpreferredencoding", lambda _do_setlocale=False: "gbk")
+    monkeypatch.setattr(xml_encoding.locale, "getpreferredencoding", lambda _do_setlocale=False: "gbk")
 
-    decoded = gpx_encoding_patches._decode_gpx_bytes(GPX_WITH_NON_ASCII.encode("utf-8"))
+    decoded = xml_encoding.decode_xml_bytes(GPX_WITH_NON_ASCII.encode("utf-8"))
 
     assert NON_ASCII_TRACK_NAME in decoded
 

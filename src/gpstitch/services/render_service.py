@@ -497,9 +497,17 @@ class RenderService:
                 # Include last output lines in error for better diagnostics
                 job = await job_manager.get_job(job_id)
                 last_lines = []
+                ffmpeg_lines = []
                 if job and job.log_lines:
+                    ffmpeg_lines = self._read_ffmpeg_output_tail(job.log_lines)
+                    if ffmpeg_lines:
+                        await job_manager.append_job_log(job_id, "=== FFmpeg Output Tail ===")
+                        for line in ffmpeg_lines:
+                            await job_manager.append_job_log(job_id, line)
+
                     # Get last non-empty output lines (skip command header)
-                    for line in reversed(job.log_lines):
+                    diagnostic_lines = ffmpeg_lines if ffmpeg_lines else job.log_lines
+                    for line in reversed(diagnostic_lines):
                         if line.startswith("=== ") or not line.strip():
                             continue
                         last_lines.insert(0, line.strip())
@@ -656,6 +664,29 @@ class RenderService:
                         except ValueError:
                             pass
                     break
+
+    @staticmethod
+    def _read_ffmpeg_output_tail(log_lines: list[str], max_lines: int = 10) -> list[str]:
+        """Read the temp stderr file printed by gopro_overlay's FFmpeg runner."""
+        output_path = None
+        path_pattern = re.compile(r"FFMPEG Output is in (.+)$")
+
+        for line in reversed(log_lines):
+            match = path_pattern.search(line)
+            if match:
+                output_path = Path(match.group(1).strip().strip("\"'"))
+                break
+
+        if output_path is None:
+            return []
+
+        try:
+            text = output_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return [f"ffmpeg: {line[-800:]}" for line in lines[-max_lines:]]
 
     async def cancel_render(self, job_id: str) -> bool:
         """Cancel a running render job."""

@@ -191,7 +191,7 @@ def _layout_requires_cairo(name: str) -> bool:
     local_path = Path(__file__).parent.parent / "layouts" / f"{name}.xml"
     if local_path.exists():
         try:
-            content = local_path.read_text()
+            content = local_path.read_text(encoding="utf-8")
             return "cairo" in content.lower()
         except OSError:
             return False
@@ -204,7 +204,7 @@ def _layout_requires_cairo(name: str) -> bool:
 
         ref = files(gopro_layouts) / f"{name}.xml"
         with as_file(ref) as path:
-            content = path.read_text()
+            content = path.read_text(encoding="utf-8")
             return "cairo" in content.lower()
     except Exception:
         return False
@@ -718,11 +718,17 @@ def _validate_creation_time(
     # miscorrections become discoverable in logs.
     system_tz = _get_system_tz_offset(creation_time)  # Bug B: use historical offset
     system_tz_seconds = int(system_tz.total_seconds())
-    system_shifted = ct_ts + (-system_tz_seconds)  # negate: UTC-7 means +7h correction
+    system_shifted = ct_ts + (-system_tz_seconds)  # Camera local-as-UTC: UTC-7 means +7h correction
+    gps_local_shifted = ct_ts + system_tz_seconds  # GPX local-as-UTC: UTC+8 means +8h correction
 
     as_is_overlap = _overlap_seconds(ct_ts, video_duration_sec, gps_min, gps_max)
     sys_overlap = (
         _overlap_seconds(system_shifted, video_duration_sec, gps_min, gps_max) if system_tz_seconds != 0 else 0.0
+    )
+    gps_local_overlap = (
+        _overlap_seconds(gps_local_shifted, video_duration_sec, gps_min, gps_max)
+        if system_tz_seconds != 0
+        else 0.0
     )
 
     if as_is_overlap > 0 and sys_overlap > 0:
@@ -756,7 +762,25 @@ def _validate_creation_time(
             tz_correction_hours=correction_hours,
         )
 
-    # Step 3: exhaustive search over all valid TZ offsets
+    # Step 3: GPX local-as-UTC correction.
+    # Some GPX exports write local wall-clock time with a UTC marker. In that case
+    # video creation_time is correct UTC, but comparison to GPX needs +system_tz.
+    if gps_local_overlap > 0:
+        shifted_dt = datetime.datetime.fromtimestamp(gps_local_shifted, tz=datetime.UTC)
+        correction_hours = system_tz_seconds / 3600
+        logger.info(
+            "System timezone GPX correction: creation_time %s shifted by %+.1fh -> %s",
+            creation_time.isoformat(),
+            correction_hours,
+            shifted_dt.isoformat(),
+        )
+        return CorrectionResult(
+            time=shifted_dt,
+            correction_type="system-tz",
+            tz_correction_hours=correction_hours,
+        )
+
+    # Step 4: exhaustive search over all valid TZ offsets
     candidates = _find_overlap_candidates(ct_ts, video_duration_sec, gps_min, gps_max)
     system_correction_sec = -system_tz_seconds
 
@@ -792,7 +816,7 @@ def _validate_creation_time(
         )
     # len > 1 but system TZ not among them, or len == 0 → fall through
 
-    # Step 4: mtime as-is (last resort, no TZ shifting)
+    # Step 5: mtime as-is (last resort, no TZ shifting)
     try:
         mtime_ts = os.stat(file_path).st_mtime
     except OSError:

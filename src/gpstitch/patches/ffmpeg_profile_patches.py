@@ -21,7 +21,7 @@ def patch_ffmpeg_profiles() -> None:
         nnvgpu["input"] = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         nnvgpu["filter"] = (
             "[0:v]scale_cuda=format=yuv420p[mp4_stream];"
-            "[1:v]format=yuva420p,hwupload[overlay_stream];"
+            "[1:v]format=yuva420p,hwupload_cuda[overlay_stream];"
             "[mp4_stream][overlay_stream]overlay_cuda"
         )
         _ensure_nvenc_output(nnvgpu, h264_profile="main")
