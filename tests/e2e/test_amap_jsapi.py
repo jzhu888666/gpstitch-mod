@@ -40,8 +40,26 @@ window.AMapLoader = {
 """
 
 
+@pytest.fixture
+def preserve_amap_settings():
+    from gpstitch.services.amap_settings import amap_settings_service
+
+    path = amap_settings_service.settings_path
+    original = path.read_bytes() if path.exists() else None
+    try:
+        yield
+    finally:
+        if original is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(original)
+
+
 @pytest.mark.e2e
-def test_amap_settings_save_and_validate_with_mock_loader(page: Page, base_url: str, live_server):
+def test_amap_settings_save_and_validate_with_mock_loader(
+    page: Page, base_url: str, live_server, preserve_amap_settings
+):
     page.add_init_script("localStorage.setItem('gpstitch_language', 'en');")
     page.request.delete(f"{base_url}/api/settings/amap")
     page.route(
@@ -105,9 +123,9 @@ def test_amap_provider_overlays_two_preview_widgets(page: Page, base_url: str, l
             });
             return {
                 widgets: layer.querySelectorAll('.amap-widget').length,
-                batches: window.__amapConvertBatches
+                batches: window.__amapConvertBatches || 0
             };
         }"""
     )
 
-    assert widget_count == {"widgets": 2, "batches": 1}
+    assert widget_count == {"widgets": 2, "batches": 0}

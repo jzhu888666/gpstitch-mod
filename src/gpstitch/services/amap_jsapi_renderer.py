@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -79,8 +80,8 @@ class AMapJSAPISnapshotRenderer:
             "kind": "moving",
             "size": int(size),
             "zoom": int(zoom),
-            "center": {"lat": float(lat), "lon": float(lon)},
-            "current": {"lat": float(lat), "lon": float(lon)},
+            "center": _to_amap_point(lat, lon),
+            "current": _to_amap_point(lat, lon),
             "route": [],
             "markerFill": _rgb(marker_fill),
             "markerOutline": _rgb(marker_outline),
@@ -99,13 +100,14 @@ class AMapJSAPISnapshotRenderer:
         marker_outline: tuple[int, int, int] = (0, 0, 0),
     ) -> Image.Image:
         route = _sample_route(route, 600)
+        current_point = _to_amap_point(current[0], current[1])
         options = {
             "kind": "journey",
             "size": int(size),
             "zoom": 16,
-            "center": {"lat": float(current[0]), "lon": float(current[1])},
-            "current": {"lat": float(current[0]), "lon": float(current[1])},
-            "route": [{"lat": float(lat), "lon": float(lon)} for lat, lon in route],
+            "center": current_point,
+            "current": current_point,
+            "route": [_to_amap_point(lat, lon) for lat, lon in route],
             "lineFill": _rgb(line_fill),
             "lineWidth": int(line_width),
             "markerFill": _rgb(marker_fill),
@@ -186,6 +188,7 @@ class AMapJSAPISnapshotRenderer:
     def _cache_key(self, options: dict[str, Any]) -> str:
         payload = {
             "version": AMAP_JSAPI_VERSION,
+            "renderer": "gcj02-local-v1",
             "fingerprint": self.runtime_config.key_fingerprint,
             "options": options,
         }
@@ -241,31 +244,8 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
       return amapPromise;
     }}
 
-    function toPair(location) {{
-      if (Array.isArray(location)) return [location[0], location[1]];
-      if (location && typeof location.getLng === 'function' && typeof location.getLat === 'function') {{
-        return [location.getLng(), location.getLat()];
-      }}
-      return [location.lng, location.lat];
-    }}
-
-    async function convertPoints(AMap, points) {{
-      if (!points.length) return [];
-      const converted = [];
-      for (let i = 0; i < points.length; i += 40) {{
-        const batch = points.slice(i, i + 40).map(point => [point.lon, point.lat]);
-        const locations = await new Promise((resolve, reject) => {{
-          AMap.convertFrom(batch, 'gps', (status, result) => {{
-            if (status === 'complete' && result && result.info === 'ok' && Array.isArray(result.locations)) {{
-              resolve(result.locations);
-            }} else {{
-              reject(new Error((result && result.info) || 'AMap coordinate conversion failed'));
-            }}
-          }});
-        }});
-        for (const location of locations) converted.push(toPair(location));
-      }}
-      return converted;
+    function toLngLat(point) {{
+      return [point.lng, point.lat];
     }}
 
     function waitMapComplete(map) {{
@@ -299,8 +279,8 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
           activeMap = null;
         }}
 
-        const current = options.current ? (await convertPoints(AMap, [options.current]))[0] : null;
-        const route = await convertPoints(AMap, options.route || []);
+        const current = options.current ? toLngLat(options.current) : null;
+        const route = (options.route || []).map(toLngLat);
         const center = current || route[0] || [116.397428, 39.90923];
 
         const map = new AMap.Map(mapEl, {{
@@ -367,6 +347,49 @@ def _sample_route(route: list[tuple[float, float]], limit: int) -> list[tuple[fl
         return route
     step = (len(route) - 1) / max(1, limit - 1)
     return [route[round(i * step)] for i in range(limit)]
+
+
+def _to_amap_point(lat: float, lon: float) -> dict[str, float]:
+    gcj_lat, gcj_lon = _wgs84_to_gcj02(float(lat), float(lon))
+    return {"lat": gcj_lat, "lng": gcj_lon}
+
+
+def _wgs84_to_gcj02(lat: float, lon: float) -> tuple[float, float]:
+    """Convert WGS84/GPS coordinates to GCJ-02 coordinates used by AMap."""
+    if _outside_china(lat, lon):
+        return lat, lon
+
+    a = 6378245.0
+    ee = 0.00669342162296594323
+    dlat = _transform_lat(lon - 105.0, lat - 35.0)
+    dlon = _transform_lon(lon - 105.0, lat - 35.0)
+    radlat = lat / 180.0 * math.pi
+    magic = math.sin(radlat)
+    magic = 1 - ee * magic * magic
+    sqrt_magic = math.sqrt(magic)
+    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrt_magic) * math.pi)
+    dlon = (dlon * 180.0) / (a / sqrt_magic * math.cos(radlat) * math.pi)
+    return lat + dlat, lon + dlon
+
+
+def _outside_china(lat: float, lon: float) -> bool:
+    return lon < 72.004 or lon > 137.8347 or lat < 0.8293 or lat > 55.8271
+
+
+def _transform_lat(x: float, y: float) -> float:
+    ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * math.sqrt(abs(x))
+    ret += (20.0 * math.sin(6.0 * x * math.pi) + 20.0 * math.sin(2.0 * x * math.pi)) * 2.0 / 3.0
+    ret += (20.0 * math.sin(y * math.pi) + 40.0 * math.sin(y / 3.0 * math.pi)) * 2.0 / 3.0
+    ret += (160.0 * math.sin(y / 12.0 * math.pi) + 320 * math.sin(y * math.pi / 30.0)) * 2.0 / 3.0
+    return ret
+
+
+def _transform_lon(x: float, y: float) -> float:
+    ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * math.sqrt(abs(x))
+    ret += (20.0 * math.sin(6.0 * x * math.pi) + 20.0 * math.sin(2.0 * x * math.pi)) * 2.0 / 3.0
+    ret += (20.0 * math.sin(x * math.pi) + 40.0 * math.sin(x / 3.0 * math.pi)) * 2.0 / 3.0
+    ret += (150.0 * math.sin(x / 12.0 * math.pi) + 300.0 * math.sin(x / 30.0 * math.pi)) * 2.0 / 3.0
+    return ret
 
 
 def _rgb(value: tuple[int, int, int]) -> str:

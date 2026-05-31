@@ -526,7 +526,9 @@ class RenderService:
                             await job_manager.append_job_log(job_id, line)
 
                     # Get last non-empty output lines (skip command header)
-                    diagnostic_lines = ffmpeg_lines if ffmpeg_lines else job.log_lines
+                    diagnostic_lines = self._read_process_error_tail(job.log_lines)
+                    if not diagnostic_lines:
+                        diagnostic_lines = ffmpeg_lines if ffmpeg_lines else job.log_lines
                     for line in reversed(diagnostic_lines):
                         if line.startswith("=== ") or not line.strip():
                             continue
@@ -737,6 +739,22 @@ class RenderService:
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         return [f"ffmpeg: {line[-800:]}" for line in lines[-max_lines:]]
+
+    @staticmethod
+    def _read_process_error_tail(log_lines: list[str], max_lines: int = 3) -> list[str]:
+        """Extract application exceptions before falling back to FFmpeg stream metadata."""
+        candidates = []
+        for line in log_lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("ffmpeg:") or stripped.startswith("==="):
+                continue
+            if (
+                " - ERROR - " in stripped
+                or re.search(r"\b(?:[\w.]*Error|[\w.]*Exception):\s+", stripped)
+                or stripped.startswith(("Traceback ", "OSError:", "RuntimeError:", "ValueError:"))
+            ):
+                candidates.append(stripped)
+        return candidates[-max_lines:]
 
     async def cancel_render(self, job_id: str) -> bool:
         """Cancel a running render job."""

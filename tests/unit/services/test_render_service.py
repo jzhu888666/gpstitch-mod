@@ -211,6 +211,25 @@ class TestFfmpegOutputDiagnostics:
 
         assert RenderService._read_ffmpeg_output_tail([f"FFMPEG Output is in {missing}"]) == []
 
+    def test_process_error_tail_prefers_application_exception(self):
+        from gpstitch.services.render_service import RenderService
+
+        lines = RenderService._read_process_error_tail(
+            [
+                "FFMPEG Output is in C:\\Temp\\ffmpeg.txt",
+                "ffmpeg: Stream #0:4[0x0]: Video: mjpeg (attached pic)",
+                "2026-05-31 15:30:48,812 - __main__ - ERROR - Failed to execute gopro-dashboard.py: AMap snapshot rendering failed",
+                "Traceback (most recent call last):",
+                "gpstitch.services.amap_jsapi_renderer.AMapRenderError: AMap snapshot rendering failed",
+            ]
+        )
+
+        assert lines == [
+            "2026-05-31 15:30:48,812 - __main__ - ERROR - Failed to execute gopro-dashboard.py: AMap snapshot rendering failed",
+            "Traceback (most recent call last):",
+            "gpstitch.services.amap_jsapi_renderer.AMapRenderError: AMap snapshot rendering failed",
+        ]
+
 
 class TestMapCacheWarmupBeforeRender:
     """Render startup should not block on large map tile warmups."""
