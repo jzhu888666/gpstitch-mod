@@ -76,3 +76,23 @@ def test_layout_map_widgets_finds_two_default_drone_maps(temp_dir):
     assert [w.name for w in widgets] == ["moving_map", "journey_map"]
     assert widgets[0].x == 1644
     assert widgets[1].y == 376
+
+
+def test_layout_map_widgets_include_amap_render_parameters(temp_dir):
+    from gpstitch.services.map_cache import MapCacheService
+
+    layout_path = temp_dir / "custom.xml"
+    layout_path.write_text(
+        '<layout><component type="journey_map" name="route" x="10" y="20" size="300" '
+        'corner_radius="12" opacity="0.55" rotate="false" fill="12,34,56" line-width="7"/></layout>',
+        encoding="utf-8",
+    )
+    service = MapCacheService(cache_dir=temp_dir / "maps")
+
+    widgets = service.get_layout_map_widgets(None, layout_xml_path=str(layout_path))
+
+    assert len(widgets) == 1
+    assert widgets[0].opacity == 0.55
+    assert widgets[0].rotate is False
+    assert widgets[0].line_fill == "#0c2238"
+    assert widgets[0].line_width == 7

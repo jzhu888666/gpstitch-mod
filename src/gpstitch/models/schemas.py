@@ -311,6 +311,10 @@ class AMapMapWidget(BaseModel):
     height: int
     zoom: int = 16
     corner_radius: int = 0
+    opacity: float = 0.7
+    rotate: bool = True
+    line_fill: str = "#1f8fff"
+    line_width: int = 5
 
 
 class AMapRenderContextRequest(BaseModel):

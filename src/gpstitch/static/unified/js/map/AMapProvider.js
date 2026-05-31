@@ -58,13 +58,19 @@ class AMapProvider {
 
         const scaleX = imageMetrics.width / Math.max(1, context.canvas_width || imageMetrics.width);
         const scaleY = imageMetrics.height / Math.max(1, context.canvas_height || imageMetrics.height);
-        const currentPoint = this._currentPoint(convertedRoute, frameTimeMs, durationMs);
+        const routeState = this._currentRouteState(convertedRoute, frameTimeMs, durationMs);
+        const currentPoint = routeState.point;
 
         for (const widget of context.map_widgets) {
             const isMovingMap = widget.type === 'moving_map';
+            const isJourneyMap = widget.type === 'journey_map' || widget.type === 'moving_journey_map';
+            const shouldDrawRoute = convertedRoute.length > 1 && (isMovingMap || isJourneyMap);
+            const rotationDegrees = widget.rotate === false ? null : routeState.heading;
             const widgetWidth = Math.max(1, Math.round(widget.width * scaleX));
             const widgetHeight = Math.max(1, Math.round(widget.height * scaleY));
-            const mapSize = isMovingMap ? Math.max(widgetWidth, widgetHeight, this._movingBackingSize(widgetWidth, widgetHeight)) : null;
+            const mapSize = (isMovingMap || rotationDegrees !== null)
+                ? Math.max(widgetWidth, widgetHeight, this._movingBackingSize(widgetWidth, widgetHeight))
+                : Math.max(widgetWidth, widgetHeight);
             const widgetEl = document.createElement('div');
             widgetEl.className = 'amap-widget';
             widgetEl.style.left = `${Math.round(widget.x * scaleX)}px`;
@@ -72,15 +78,14 @@ class AMapProvider {
             widgetEl.style.width = `${widgetWidth}px`;
             widgetEl.style.height = `${widgetHeight}px`;
             widgetEl.style.borderRadius = `${Math.max(0, Math.round((widget.corner_radius || 0) * scaleX))}px`;
+            widgetEl.style.opacity = `${Math.max(0, Math.min(1, Number(widget.opacity ?? 0.7)))}`;
 
             const mapEl = document.createElement('div');
             mapEl.className = 'amap-widget-map';
-            if (isMovingMap) {
-                mapEl.style.width = `${mapSize}px`;
-                mapEl.style.height = `${mapSize}px`;
-                mapEl.style.left = `${Math.round((widgetWidth - mapSize) / 2)}px`;
-                mapEl.style.top = `${Math.round((widgetHeight - mapSize) / 2)}px`;
-            }
+            mapEl.style.width = `${mapSize}px`;
+            mapEl.style.height = `${mapSize}px`;
+            mapEl.style.left = `${Math.round((widgetWidth - mapSize) / 2)}px`;
+            mapEl.style.top = `${Math.round((widgetHeight - mapSize) / 2)}px`;
             widgetEl.appendChild(mapEl);
             layer.appendChild(widgetEl);
 
@@ -93,13 +98,13 @@ class AMapProvider {
             });
 
             const overlays = [];
-            if (!isMovingMap && convertedRoute.length > 1) {
+            if (shouldDrawRoute) {
                 const polyline = new AMap.Polyline({
                     path: convertedRoute,
                     showDir: false,
-                    strokeColor: '#1f8fff',
+                    strokeColor: widget.line_fill || '#1f8fff',
                     strokeOpacity: 0.9,
-                    strokeWeight: 5,
+                    strokeWeight: Math.max(1, Number(widget.line_width || 5)),
                     lineJoin: 'round',
                     zIndex: 20,
                 });
@@ -118,13 +123,22 @@ class AMapProvider {
                 overlays.push(marker);
             }
 
-            if (widget.type === 'journey_map' && overlays.length > 0) {
-                map.setFitView(overlays, false, [0, 0, 0, 0]);
+            if (isJourneyMap && !isMovingMap && overlays.length > 0) {
+                const fitPadding = rotationDegrees !== null ? Math.round(Math.min(widgetWidth, widgetHeight) / 2) : 0;
+                map.setFitView(overlays, false, [fitPadding, fitPadding, fitPadding, fitPadding]);
             } else if (currentPoint) {
                 map.setCenter(currentPoint);
                 map.setZoom(widget.zoom || 16);
             }
 
+            await this._waitMapSettled(map);
+            this._applyMapViewport(
+                mapEl,
+                widgetWidth,
+                widgetHeight,
+                this._pointToContainerPixel(map, currentPoint, mapSize),
+                rotationDegrees
+            );
             this.maps.push(map);
         }
     }
@@ -282,15 +296,87 @@ class AMapProvider {
         ].join('|');
     }
 
-    _currentPoint(route, frameTimeMs, durationMs) {
-        if (!route.length) return null;
-        if (!durationMs || durationMs <= 0) return route[Math.floor(route.length / 2)];
+    _currentRouteState(route, frameTimeMs, durationMs) {
+        if (!route.length) return { point: null, index: -1, heading: null };
+        if (!durationMs || durationMs <= 0) {
+            const index = Math.floor(route.length / 2);
+            return {
+                point: route[index],
+                index,
+                heading: this._headingDegrees(route, index),
+            };
+        }
         const ratio = Math.max(0, Math.min(1, frameTimeMs / durationMs));
-        return route[Math.min(route.length - 1, Math.round(ratio * (route.length - 1)))];
+        const index = Math.min(route.length - 1, Math.round(ratio * (route.length - 1)));
+        return {
+            point: route[index],
+            index,
+            heading: this._headingDegrees(route, index),
+        };
+    }
+
+    _headingDegrees(route, index) {
+        if (route.length < 2 || index < 0) return null;
+        const start = route[Math.max(0, index - 1)];
+        const end = route[Math.min(route.length - 1, index + 1)];
+        if (!start || !end || (start[0] === end[0] && start[1] === end[1])) return null;
+
+        const lat1 = start[1] * Math.PI / 180;
+        const lat2 = end[1] * Math.PI / 180;
+        const deltaLon = (end[0] - start[0]) * Math.PI / 180;
+        const y = Math.sin(deltaLon) * Math.cos(lat2);
+        const x = Math.cos(lat1) * Math.sin(lat2) -
+            Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLon);
+        if (x === 0 && y === 0) return null;
+        return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
     }
 
     _movingBackingSize(width, height) {
         return Math.floor(Math.sqrt((width ** 2) + (height ** 2)));
+    }
+
+    _waitMapSettled(map) {
+        return new Promise(resolve => {
+            if (!map || typeof map.on !== 'function') {
+                window.setTimeout(resolve, 0);
+                return;
+            }
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                resolve();
+            };
+            map.on('complete', finish);
+            window.setTimeout(finish, 450);
+        });
+    }
+
+    _pointToContainerPixel(map, point, mapSize) {
+        if (point && map && typeof map.lngLatToContainer === 'function') {
+            try {
+                const pixel = map.lngLatToContainer(point);
+                const x = typeof pixel.getX === 'function' ? pixel.getX() : pixel.x;
+                const y = typeof pixel.getY === 'function' ? pixel.getY() : pixel.y;
+                if (Number.isFinite(x) && Number.isFinite(y)) {
+                    return { x, y };
+                }
+            } catch (e) {
+                // Fall through to center-based positioning.
+            }
+        }
+        return { x: mapSize / 2, y: mapSize / 2 };
+    }
+
+    _applyMapViewport(mapEl, widgetWidth, widgetHeight, currentPixel, rotationDegrees) {
+        const x = Number.isFinite(currentPixel?.x) ? currentPixel.x : mapEl.offsetWidth / 2;
+        const y = Number.isFinite(currentPixel?.y) ? currentPixel.y : mapEl.offsetHeight / 2;
+        mapEl.style.left = `${Math.round(widgetWidth / 2 - x)}px`;
+        mapEl.style.top = `${Math.round(widgetHeight / 2 - y)}px`;
+        mapEl.style.transformOrigin = `${x}px ${y}px`;
+        mapEl.style.transform = rotationDegrees === null || rotationDegrees === undefined
+            ? ''
+            : `rotate(${-rotationDegrees}deg)`;
     }
 }
 

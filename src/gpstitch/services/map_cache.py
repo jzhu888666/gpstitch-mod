@@ -352,6 +352,10 @@ def _collect_map_widgets(
                 height=_int_attr(elem, "height", size),
                 zoom=_int_attr(elem, "zoom", 16),
                 corner_radius=_int_attr(elem, "corner_radius", _int_attr(elem, "cr", 0)),
+                opacity=_float_attr(elem, "opacity", 0.7),
+                rotate=_bool_attr(elem, "rotate", True),
+                line_fill=_color_attr(elem, "fill", "#1f8fff"),
+                line_width=_int_attr(elem, "line-width", 5),
             )
         )
 
@@ -393,6 +397,34 @@ def _int_attr(elem: ET.Element, attr: str, default: int) -> int:
         return int(elem.attrib.get(attr, default))
     except (TypeError, ValueError):
         return default
+
+
+def _float_attr(elem: ET.Element, attr: str, default: float) -> float:
+    try:
+        return float(elem.attrib.get(attr, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool_attr(elem: ET.Element, attr: str, default: bool) -> bool:
+    raw = elem.attrib.get(attr)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _color_attr(elem: ET.Element, attr: str, default: str) -> str:
+    raw = elem.attrib.get(attr)
+    if not raw:
+        return default
+    parts = [part.strip() for part in raw.split(",")]
+    if len(parts) < 3:
+        return default
+    try:
+        r, g, b = (max(0, min(255, int(float(part)))) for part in parts[:3])
+    except ValueError:
+        return default
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def _estimate_square_tile_count(size: int) -> int:
@@ -462,9 +494,11 @@ def _amap_cache_key(
     digest.update(_route_hash(points).encode("ascii"))
     for widget in widgets:
         digest.update(
-            f"|{widget.name}:{widget.type}:{widget.x}:{widget.y}:{widget.width}:{widget.height}:{widget.zoom}".encode(
-                "utf-8"
-            )
+            (
+                f"|{widget.name}:{widget.type}:{widget.x}:{widget.y}:{widget.width}:{widget.height}:"
+                f"{widget.zoom}:{widget.corner_radius}:{widget.opacity:.3f}:{widget.rotate}:"
+                f"{widget.line_fill}:{widget.line_width}"
+            ).encode("utf-8")
         )
     return digest.hexdigest()[:24]
 

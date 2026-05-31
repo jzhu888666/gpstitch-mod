@@ -95,6 +95,83 @@ def test_render_moving_uses_quantized_base_without_browser_marker(monkeypatch, t
     assert _has_blue_marker_near_center(image)
 
 
+def test_render_moving_draws_route_on_cached_base(monkeypatch, tmp_path):
+    from gpstitch.services.amap_jsapi_renderer import AMapJSAPISnapshotRenderer, AMapSnapshot
+
+    renderer = AMapJSAPISnapshotRenderer(
+        SimpleNamespace(
+            configured=True,
+            validated=True,
+            key="test-key",
+            security_js_code="test-security",
+            key_fingerprint="test-fp",
+        ),
+        cache_dir=tmp_path,
+    )
+    captured = []
+
+    def fake_render(options):
+        captured.append(options)
+        return AMapSnapshot(Image.new("RGBA", (options["size"], options["size"]), (255, 255, 255, 255)), {})
+
+    monkeypatch.setattr(renderer, "_render_cached_snapshot", fake_render)
+
+    image = renderer.render_moving(
+        lat=29.698164997988393,
+        lon=92.22652316093446,
+        route=[
+            (29.698164997988393, 92.22652316093446),
+            (29.698164997988393, 92.22752316093446),
+        ],
+        size=256,
+        zoom=17,
+        line_fill=(0, 255, 0),
+        line_width=4,
+    )
+
+    assert captured[0]["route"] == []
+    assert _has_green_route_pixel(image)
+
+
+def test_render_journey_rotation_uses_backing_map_and_centers_marker(monkeypatch, tmp_path):
+    from gpstitch.services.amap_jsapi_renderer import AMapJSAPISnapshotRenderer, AMapSnapshot
+
+    renderer = AMapJSAPISnapshotRenderer(
+        SimpleNamespace(
+            configured=True,
+            validated=True,
+            key="test-key",
+            security_js_code="test-security",
+            key_fingerprint="test-fp",
+        ),
+        cache_dir=tmp_path,
+    )
+    captured = {}
+
+    def fake_render(options):
+        captured.setdefault("options", options)
+        return AMapSnapshot(Image.new("RGBA", (options["size"], options["size"]), (255, 255, 255, 255)), {
+            "center": {"lat": 29.695315106096245, "lng": 92.22754311668311},
+            "zoom": 16,
+        })
+
+    monkeypatch.setattr(renderer, "_render_cached_snapshot", fake_render)
+
+    image = renderer.render_journey(
+        route=[
+            (29.698164997988393, 92.22652316093446),
+            (29.698164997988393, 92.22752316093446),
+        ],
+        current=(29.698164997988393, 92.22652316093446),
+        size=256,
+        rotation_degrees=90,
+    )
+
+    assert captured["options"]["size"] == int(math.sqrt((256**2) * 2))
+    assert image.size == (256, 256)
+    assert image.getpixel((128, 128))[:3] == (0, 0, 255)
+
+
 def test_renderer_html_hides_amap_attribution():
     from gpstitch.services.amap_jsapi_renderer import _renderer_html
 
@@ -156,5 +233,13 @@ def _has_blue_marker_near_center(image: Image.Image) -> bool:
     for x in range(112, 145):
         for y in range(112, 145):
             if image.getpixel((x, y))[:3] == (0, 0, 255):
+                return True
+    return False
+
+
+def _has_green_route_pixel(image: Image.Image) -> bool:
+    for x in range(140, 220):
+        for y in range(120, 137):
+            if image.getpixel((x, y))[:3] == (0, 255, 0):
                 return True
     return False

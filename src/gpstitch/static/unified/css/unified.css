@@ -619,9 +619,9 @@ body {
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: #ef476f;
-    border: 2px solid #ffffff;
-    box-shadow: 0 0 0 3px rgba(239, 71, 111, 0.25);
+    background: #006dff;
+    border: 2px solid #000000;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
 }
 
 /* Canvas (for Advanced mode) */

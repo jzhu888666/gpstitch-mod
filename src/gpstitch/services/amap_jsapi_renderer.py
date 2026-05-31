@@ -86,13 +86,17 @@ class AMapJSAPISnapshotRenderer:
         *,
         lat: float,
         lon: float,
+        route: list[tuple[float, float]] | None = None,
         size: int,
         zoom: int,
         rotation_degrees: float | None = None,
+        line_fill: tuple[int, int, int] = (31, 143, 255),
+        line_width: int = 5,
         marker_fill: tuple[int, int, int] = (0, 0, 255),
         marker_outline: tuple[int, int, int] = (0, 0, 0),
     ) -> Image.Image:
         current = _to_amap_point(lat, lon)
+        route = _sample_route(route or [], 600)
         output_size = int(size)
         render_size = _moving_backing_size(output_size)
         center = _quantize_point(current, int(zoom), MOVING_MAP_GRID_PIXELS)
@@ -106,12 +110,23 @@ class AMapJSAPISnapshotRenderer:
         }
         snapshot = self._render_cached_snapshot(options)
         frame = snapshot.image.copy()
+        if route:
+            _draw_route_line(
+                frame,
+                [
+                    _project_point(_to_amap_point(route_lat, route_lon), center, int(zoom), render_size)
+                    for route_lat, route_lon in route
+                ],
+                line_fill,
+                line_width,
+            )
         marker_xy = _project_point(current, center, int(zoom), render_size)
         frame = _center_image_on_point(frame, marker_xy)
-        _draw_marker(frame, _image_center(frame), marker_fill, marker_outline)
         if rotation_degrees is not None:
             frame = frame.rotate(float(rotation_degrees) % 360, resample=Image.BILINEAR)
-        return _center_crop(frame, output_size)
+        frame = _center_crop(frame, output_size)
+        _draw_marker(frame, _image_center(frame), marker_fill, marker_outline)
+        return frame
 
     def render_journey(
         self,
@@ -119,21 +134,24 @@ class AMapJSAPISnapshotRenderer:
         route: list[tuple[float, float]],
         current: tuple[float, float],
         size: int,
+        rotation_degrees: float | None = None,
         line_fill: tuple[int, int, int] = (31, 143, 255),
         line_width: int = 5,
         marker_fill: tuple[int, int, int] = (0, 0, 255),
         marker_outline: tuple[int, int, int] = (0, 0, 0),
     ) -> Image.Image:
         route = _sample_route(route, 600)
+        output_size = int(size)
+        render_size = _moving_backing_size(output_size) if rotation_degrees is not None else output_size
         current_point = _to_amap_point(current[0], current[1])
         options = {
             "kind": "journey-base",
-            "size": int(size),
+            "size": render_size,
             "zoom": 16,
             "route": [_to_amap_point(lat, lon) for lat, lon in route],
             "lineFill": _rgb(line_fill),
             "lineWidth": int(line_width),
-            "fitPadding": [0, 0, 0, 0],
+            "fitPadding": [round(output_size / 2)] * 4 if rotation_degrees is not None else [0, 0, 0, 0],
             "drawMarker": False,
         }
         snapshot = self._render_cached_snapshot(options)
@@ -141,10 +159,20 @@ class AMapJSAPISnapshotRenderer:
         zoom = snapshot.metadata.get("zoom")
         frame = snapshot.image.copy()
         if _valid_amap_point(center) and isinstance(zoom, int | float):
-            marker_xy = _project_point(current_point, center, float(zoom), int(size))
-            _draw_marker(frame, marker_xy, marker_fill, marker_outline)
+            marker_xy = _project_point(current_point, center, float(zoom), render_size)
         else:
-            _draw_marker(frame, (int(size / 2), int(size / 2)), marker_fill, marker_outline)
+            marker_xy = _image_center(frame)
+        if rotation_degrees is not None:
+            frame = frame.rotate(
+                float(rotation_degrees) % 360,
+                resample=Image.BILINEAR,
+                center=marker_xy,
+                fillcolor=(0, 0, 0, 0),
+            )
+            frame = _crop_around_point(frame, marker_xy, output_size)
+            _draw_marker(frame, _image_center(frame), marker_fill, marker_outline)
+            return frame
+        _draw_marker(frame, marker_xy, marker_fill, marker_outline)
         return frame
 
     def _render_cached(self, options: dict[str, Any]) -> Image.Image:
@@ -256,7 +284,7 @@ class AMapJSAPISnapshotRenderer:
     def _cache_key(self, options: dict[str, Any]) -> str:
         payload = {
             "version": AMAP_JSAPI_VERSION,
-            "renderer": "gcj02-local-marker-scale-v2",
+            "renderer": "gcj02-route-heading-v3",
             "fingerprint": self.runtime_config.key_fingerprint,
             "options": options,
         }
@@ -464,6 +492,25 @@ def _center_crop(image: Image.Image, size: int) -> Image.Image:
     return image.crop((left, top, left + size, top + size))
 
 
+def _crop_around_point(image: Image.Image, point: tuple[int, int], size: int) -> Image.Image:
+    size = int(size)
+    left = int(round(point[0] - size / 2))
+    top = int(round(point[1] - size / 2))
+    right = left + size
+    bottom = top + size
+    src_left = max(0, left)
+    src_top = max(0, top)
+    src_right = min(image.width, right)
+    src_bottom = min(image.height, bottom)
+    cropped = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    if src_left < src_right and src_top < src_bottom:
+        cropped.alpha_composite(
+            image.crop((src_left, src_top, src_right, src_bottom)),
+            (src_left - left, src_top - top),
+        )
+    return cropped
+
+
 def _center_image_on_point(image: Image.Image, point: tuple[int, int]) -> Image.Image:
     center = _image_center(image)
     dx = center[0] - int(point[0])
@@ -556,6 +603,18 @@ def _draw_marker(
         fill=outline_color,
     )
     draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=fill_color)
+
+
+def _draw_route_line(
+    image: Image.Image,
+    points: list[tuple[int, int]],
+    fill: tuple[int, ...],
+    width: int,
+) -> None:
+    if len(points) < 2:
+        return
+    draw = ImageDraw.Draw(image)
+    draw.line(points, fill=_rgba((*fill[:3], 230)), width=max(1, int(width)), joint="curve")
 
 
 def _wgs84_to_gcj02(lat: float, lon: float) -> tuple[float, float]:
