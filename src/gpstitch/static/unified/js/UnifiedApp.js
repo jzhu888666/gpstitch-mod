@@ -21,6 +21,7 @@ class UnifiedApp {
         this.refreshBtn = document.getElementById('btn-refresh-preview');
         this.previewContainerEl = document.getElementById('preview-container');
         this.previewImageEl = document.getElementById('preview-image');
+        this.amapLayerEl = document.getElementById('amap-preview-layer');
         this.statusMessageEl = document.getElementById('status-message');
         this.statusFrameEl = document.getElementById('status-frame');
 
@@ -31,6 +32,14 @@ class UnifiedApp {
         this.unitsDistanceSelect = document.getElementById('units-distance');
         this.unitsTemperatureSelect = document.getElementById('units-temperature');
         this.mapStyleSelect = document.getElementById('map-style');
+        this.amapSettingsPanel = document.getElementById('amap-settings-panel');
+        this.amapStatusEl = document.getElementById('amap-settings-status');
+        this.amapKeyInput = document.getElementById('amap-key-input');
+        this.amapSecurityInput = document.getElementById('amap-security-input');
+        this.amapSaveBtn = document.getElementById('amap-save-btn');
+        this.amapValidateBtn = document.getElementById('amap-validate-btn');
+        this.amapClearBtn = document.getElementById('amap-clear-btn');
+        this.amapHintEl = document.getElementById('amap-settings-hint');
         this.ffmpegProfileSelect = document.getElementById('ffmpeg-profile');
         this.ffmpegProfileHint = document.getElementById('ffmpeg-profile-hint');
         this.languageSelect = document.getElementById('language-select');
@@ -42,6 +51,9 @@ class UnifiedApp {
         // Auto preview checkbox
         this.autoPreviewCheckbox = document.getElementById('auto-preview');
         this._lastMapWarmupKey = null;
+        this._amapSettings = null;
+        this._amapContextAbortController = null;
+        this.amapProvider = window.AMapProvider ? new window.AMapProvider() : null;
     }
 
     /**
@@ -117,11 +129,13 @@ class UnifiedApp {
 
         // Store map styles data for later use
         this._mapStyles = stylesData.styles;
+        await this._loadAmapSettings();
 
         this._populateSelect(this.mapStyleSelect, stylesData.styles.map(s => ({
             value: s.name,
-                label: s.requires_api_key ? `${s.display_name} (${window.i18n.t('API Key Required')})` : s.display_name
+            label: this._formatMapStyleLabel(s)
         })), this.state.quickConfig.mapStyle);
+        this._updateAmapSettingsPanel();
 
         // Load FFmpeg profiles
         const profilesResponse = await fetch(`/api/options/ffmpeg-profiles?language=${language}`);
@@ -160,6 +174,21 @@ class UnifiedApp {
         if (!this._mapStyles) return;
 
         const style = this._mapStyles.find(s => s.name === styleName);
+        if (style?.provider === 'amap') {
+            this._updateAmapSettingsPanel();
+            if (!style.configured || !style.validated) {
+                window.toast?.warning(
+                    window.i18n?.t('AMap requires a validated key and security JS code.') ||
+                    'AMap requires a validated key and security JS code.',
+                    {
+                        title: window.i18n?.t('AMap JS API') || 'AMap JS API',
+                        duration: 6000
+                    }
+                );
+            }
+            return;
+        }
+
         if (style && style.requires_api_key) {
             if (window.toast) {
                 window.toast.warning(
@@ -176,6 +205,164 @@ class UnifiedApp {
                 );
             }
         }
+    }
+
+    _formatMapStyleLabel(style) {
+        if (style.provider === 'amap') {
+            if (style.validated) {
+                return `${style.display_name} (${window.i18n?.t('Validated') || 'Validated'})`;
+            }
+            if (style.configured) {
+                return `${style.display_name} (${window.i18n?.t('Validation Required') || 'Validation Required'})`;
+            }
+            return `${style.display_name} (${window.i18n?.t('Setup Required') || 'Setup Required'})`;
+        }
+        return style.requires_api_key
+            ? `${style.display_name} (${window.i18n.t('API Key Required')})`
+            : style.display_name;
+    }
+
+    _currentMapStyleMeta() {
+        const name = this.state.quickConfig.mapStyle || this.mapStyleSelect?.value;
+        return this._mapStyles?.find(s => s.name === name) || null;
+    }
+
+    _isAmapStyle(styleName) {
+        const style = this._mapStyles?.find(s => s.name === styleName);
+        return style?.provider === 'amap' || styleName === 'amap-jsapi' || styleName === 'amap';
+    }
+
+    async _loadAmapSettings() {
+        try {
+            const response = await fetch('/api/settings/amap');
+            if (response.ok) {
+                this._amapSettings = await response.json();
+            }
+        } catch (error) {
+            console.warn('AMap settings load failed:', error);
+        }
+        this._updateAmapSettingsPanel();
+    }
+
+    _updateAmapSettingsPanel() {
+        if (!this.amapSettingsPanel) return;
+        const selected = this._isAmapStyle(this.state.quickConfig.mapStyle || this.mapStyleSelect?.value);
+        this.amapSettingsPanel.classList.toggle('hidden', !selected);
+        if (!selected) return;
+
+        const settings = this._amapSettings || {};
+        const status = settings.validated
+            ? (window.i18n?.t('Validated') || 'Validated')
+            : settings.configured
+                ? (window.i18n?.t('Validation Required') || 'Validation Required')
+                : (window.i18n?.t('Not configured') || 'Not configured');
+        if (this.amapStatusEl) {
+            this.amapStatusEl.textContent = status;
+            this.amapStatusEl.classList.toggle('validated', Boolean(settings.validated));
+        }
+        if (this.amapHintEl) {
+            if (settings.key_fingerprint) {
+                this.amapHintEl.textContent = `${window.i18n?.t('Saved key fingerprint') || 'Saved key fingerprint'}: ${settings.key_fingerprint}`;
+            } else {
+                this.amapHintEl.textContent = window.i18n?.t('Enter AMap Web JSAPI key and security JS code.') ||
+                    'Enter AMap Web JSAPI key and security JS code.';
+            }
+        }
+    }
+
+    async _saveAmapSettings() {
+        const key = this.amapKeyInput?.value?.trim();
+        const security = this.amapSecurityInput?.value?.trim();
+        if (!key || !security) {
+            window.toast?.error(
+                window.i18n?.t('AMap key and security JS code are required.') ||
+                'AMap key and security JS code are required.',
+                { title: window.i18n?.t('AMap JS API') || 'AMap JS API' }
+            );
+            return;
+        }
+        const response = await fetch('/api/settings/amap', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, security_js_code: security })
+        });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to save AMap settings');
+        }
+        this._amapSettings = await response.json();
+        this.amapKeyInput.value = '';
+        this.amapSecurityInput.value = '';
+        window.toast?.success?.(
+            window.i18n?.t('AMap settings saved') || 'AMap settings saved',
+            { title: window.i18n?.t('AMap JS API') || 'AMap JS API' }
+        );
+        await this._loadOptions();
+    }
+
+    async _validateAmapSettings() {
+        if (!this.amapProvider) {
+            throw new Error('AMap provider is unavailable.');
+        }
+        const runtime = await this._getAmapRuntimeConfig();
+        if (!runtime.configured) {
+            throw new Error(window.i18n?.t('AMap credentials are not configured.') || 'AMap credentials are not configured.');
+        }
+        try {
+            await this.amapProvider.validate(runtime);
+            await this._recordAmapValidation(true);
+            window.toast?.success?.(
+                window.i18n?.t('AMap validation succeeded') || 'AMap validation succeeded',
+                { title: window.i18n?.t('AMap JS API') || 'AMap JS API' }
+            );
+            await this._loadOptions();
+            await this._renderAmapOverlayIfNeeded();
+        } catch (error) {
+            await this._recordAmapValidation(false, error.message);
+            await this._loadOptions();
+            throw error;
+        }
+    }
+
+    async _clearAmapSettings() {
+        const response = await fetch('/api/settings/amap', { method: 'DELETE' });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to clear AMap settings');
+        }
+        this._amapSettings = await response.json();
+        this.amapProvider?.destroy();
+        this._hideAmapLayer();
+        if (this._isAmapStyle(this.state.quickConfig.mapStyle)) {
+            this.state.updateQuickConfig({ mapStyle: 'osm' });
+            if (this.mapStyleSelect) this.mapStyleSelect.value = 'osm';
+        }
+        await fetch('/api/map-cache/amap', { method: 'DELETE' }).catch(() => {});
+        await this._loadOptions();
+        window.toast?.success?.(
+            window.i18n?.t('AMap settings cleared') || 'AMap settings cleared',
+            { title: window.i18n?.t('AMap JS API') || 'AMap JS API' }
+        );
+    }
+
+    async _recordAmapValidation(success, error = null) {
+        const response = await fetch('/api/settings/amap/validate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ success, error })
+        });
+        if (response.ok) {
+            this._amapSettings = await response.json();
+        }
+    }
+
+    async _getAmapRuntimeConfig() {
+        const response = await fetch('/api/settings/amap/runtime-config');
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to load AMap runtime config');
+        }
+        return response.json();
     }
 
     _populateSelect(select, options, defaultValue) {
@@ -264,6 +451,7 @@ class UnifiedApp {
 
         this.state.on('language:changed', () => {
             this._applyLanguage();
+            this._updateAmapSettingsPanel();
         });
 
         // Config changes trigger preview update
@@ -297,9 +485,42 @@ class UnifiedApp {
             const newStyle = this.mapStyleSelect.value;
             this._checkMapStyleApiKey(newStyle);
             this.state.updateQuickConfig({ mapStyle: newStyle });
+            this._updateAmapSettingsPanel();
+            if (!this._isAmapStyle(newStyle)) {
+                this._hideAmapLayer();
+            }
             this._warmMapCacheIfNeeded();
             this._requestPreview();
         });
+
+        if (this.amapSaveBtn) {
+            this.amapSaveBtn.addEventListener('click', async () => {
+                try {
+                    await this._saveAmapSettings();
+                } catch (error) {
+                    window.toast?.error(error.message, { title: window.i18n?.t('AMap JS API') || 'AMap JS API' });
+                }
+            });
+        }
+        if (this.amapValidateBtn) {
+            this.amapValidateBtn.addEventListener('click', async () => {
+                try {
+                    await this._validateAmapSettings();
+                } catch (error) {
+                    window.toast?.error(error.message, { title: window.i18n?.t('AMap JS API') || 'AMap JS API' });
+                }
+            });
+        }
+        if (this.amapClearBtn) {
+            this.amapClearBtn.addEventListener('click', async () => {
+                try {
+                    await this._clearAmapSettings();
+                } catch (error) {
+                    window.toast?.error(error.message, { title: window.i18n?.t('AMap JS API') || 'AMap JS API' });
+                }
+            });
+        }
+        window.addEventListener('resize', () => this._renderAmapOverlayIfNeeded());
 
         // FFmpeg profile change (no preview needed, only affects render)
         this.ffmpegProfileSelect.addEventListener('change', () => {
@@ -386,6 +607,7 @@ class UnifiedApp {
             }
             this._hideFileContext();
             this._showPreviewEmpty();
+            this._hideAmapLayer();
         });
 
         // Timeline seek triggers preview
@@ -813,6 +1035,101 @@ class UnifiedApp {
         }
     }
 
+    async _renderAmapOverlayIfNeeded() {
+        if (!this._isAmapStyle(this.state.quickConfig.mapStyle)) {
+            this._hideAmapLayer();
+            return;
+        }
+        if (this.state.mode !== 'quick' || !this.state.hasValidSession() || !this.previewImageEl?.complete) {
+            return;
+        }
+        if (!this.amapProvider || !this.amapLayerEl) {
+            return;
+        }
+
+        const style = this._currentMapStyleMeta();
+        if (!style?.configured || !style?.validated) {
+            this._hideAmapLayer();
+            return;
+        }
+
+        if (this._amapContextAbortController) {
+            this._amapContextAbortController.abort();
+        }
+        this._amapContextAbortController = new AbortController();
+        const { signal } = this._amapContextAbortController;
+
+        try {
+            const runtimeConfig = await this._getAmapRuntimeConfig();
+            if (!runtimeConfig.validated) {
+                this._hideAmapLayer();
+                return;
+            }
+
+            const config = this.state.getPreviewConfig();
+            const response = await fetch('/api/map-cache/amap-context', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: this.state.sessionId,
+                    layout: typeof config.layout === 'string' ? config.layout : this.state.quickConfig.layout,
+                    frame_time_ms: Math.round(config.frameTimeMs || 0),
+                    language: config.language || this.state.language || 'zh-CN'
+                }),
+                signal
+            });
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to prepare AMap context');
+            }
+
+            const context = await response.json();
+            const imageMetrics = this._getPreviewImageMetrics();
+            if (!imageMetrics || !context.map_widgets?.length) {
+                this._hideAmapLayer();
+                return;
+            }
+
+            await this.amapProvider.render({
+                layer: this.amapLayerEl,
+                runtimeConfig,
+                context,
+                imageMetrics,
+                frameTimeMs: config.frameTimeMs || 0,
+                durationMs: this.state.duration || 0,
+            });
+        } catch (error) {
+            if (error.name === 'AbortError') return;
+            this._hideAmapLayer();
+            console.warn('AMap overlay failed:', error);
+            window.toast?.warning(error.message, {
+                title: window.i18n?.t('AMap JS API') || 'AMap JS API',
+                duration: 5000
+            });
+        }
+    }
+
+    _getPreviewImageMetrics() {
+        if (!this.previewImageEl || !this.previewContainerEl) return null;
+        const imgRect = this.previewImageEl.getBoundingClientRect();
+        const containerRect = this.previewContainerEl.getBoundingClientRect();
+        if (imgRect.width <= 0 || imgRect.height <= 0) return null;
+        return {
+            left: imgRect.left - containerRect.left,
+            top: imgRect.top - containerRect.top,
+            width: imgRect.width,
+            height: imgRect.height,
+        };
+    }
+
+    _hideAmapLayer(destroy = true) {
+        if (destroy) this.amapProvider?.destroy();
+        if (this.amapLayerEl) {
+            this.amapLayerEl.classList.add('hidden');
+            this.amapLayerEl.innerHTML = '';
+        }
+    }
+
     /**
      * Generate preview
      */
@@ -930,6 +1247,7 @@ class UnifiedApp {
         }
         this._hidePreviewLoading();
         this.previewContainerEl.classList.add('hidden');
+        this._hideAmapLayer();
     }
 
     _showPreviewLoading() {
@@ -967,13 +1285,18 @@ class UnifiedApp {
             this.previewImageEl.onload = () => {
                 console.log('Quick mode: image loaded, natural size:',
                     this.previewImageEl.naturalWidth, 'x', this.previewImageEl.naturalHeight);
+                this._renderAmapOverlayIfNeeded();
             };
             this.previewImageEl.onerror = (e) => {
                 console.error('Quick mode: image failed to load:', e);
             };
 
             this.previewImageEl.src = imgSrc;
+            if (this.previewImageEl.complete) {
+                this._renderAmapOverlayIfNeeded();
+            }
         } else {
+            this._hideAmapLayer();
             // Advanced mode: show preview image behind canvas
             const canvasPreviewImg = document.getElementById('canvas-preview-image');
             const canvasEl = document.getElementById('canvas');

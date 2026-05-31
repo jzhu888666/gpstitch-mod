@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache"
     map_cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "maps"
     layout_cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "layouts"
+    settings_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "settings"
     map_cache_warmup_max_tiles: int = 2048
     # Keep render startup responsive. Frontend/background warmup can prefetch
     # many tiles, while render itself should not block on network tile fetches.
@@ -61,6 +62,7 @@ class Settings(BaseSettings):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.map_cache_dir.mkdir(parents=True, exist_ok=True)
         self.layout_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.settings_dir.mkdir(parents=True, exist_ok=True)
         self.templates_dir.mkdir(parents=True, exist_ok=True)
 
 

@@ -182,6 +182,7 @@
                     <!-- Preview container (for Quick mode) -->
                     <div id="preview-container" class="preview-container hidden">
                         <img id="preview-image" alt="" aria-hidden="true">
+                        <div id="amap-preview-layer" class="amap-preview-layer hidden" aria-hidden="true"></div>
                     </div>
 
                     <!-- Canvas container (for Advanced mode) -->
@@ -273,6 +274,20 @@
                     <div class="config-group">
                         <label>Map Style</label>
                         <select id="map-style"></select>
+                        <div id="amap-settings-panel" class="amap-settings-panel hidden">
+                            <div class="amap-settings-header">
+                                <span>AMap JS API</span>
+                                <span id="amap-settings-status" class="amap-settings-status">Not configured</span>
+                            </div>
+                            <input type="password" id="amap-key-input" autocomplete="off" placeholder="Web JSAPI key">
+                            <input type="password" id="amap-security-input" autocomplete="off" placeholder="Security JS code">
+                            <div class="amap-settings-actions">
+                                <button type="button" id="amap-save-btn" class="btn btn-sm btn-secondary">Save</button>
+                                <button type="button" id="amap-validate-btn" class="btn btn-sm btn-secondary">Validate</button>
+                                <button type="button" id="amap-clear-btn" class="btn btn-sm btn-secondary">Clear</button>
+                            </div>
+                            <small id="amap-settings-hint" class="config-hint"></small>
+                        </div>
                     </div>
                     <div class="config-group">
                         <label>FFmpeg Profile</label>
@@ -364,6 +379,7 @@
     <script src="/static/unified/js/state/UnifiedState.js"></script>
     <script src="/static/unified/js/utils/PreviewDebouncer.js"></script>
     <script src="/static/unified/js/services/TemplateService.js"></script>
+    <script src="/static/unified/js/map/AMapProvider.js"></script>
     <script src="/static/unified/js/components/FileUploader.js"></script>
     <script src="/static/unified/js/components/Timeline.js"></script>
     <script src="/static/unified/js/components/TemplateModal.js"></script>

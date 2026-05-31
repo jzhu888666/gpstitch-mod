@@ -149,6 +149,11 @@ class MapStyleOption(BaseModel):
     name: str
     display_name: str
     requires_api_key: bool = False
+    provider: str = "gopro-overlay"
+    requires_security_js_code: bool = False
+    configured: bool | None = None
+    validated: bool | None = None
+    key_fingerprint: str | None = None
 
 
 class MapStylesResponse(BaseModel):
@@ -253,6 +258,91 @@ class ConfigResponse(BaseModel):
     default_language: LanguageCode = DEFAULT_LANGUAGE
 
 
+class AMapSettingsUpdateRequest(BaseModel):
+    """Request to save AMap JS API credentials."""
+
+    key: str = Field(min_length=1)
+    security_js_code: str = Field(min_length=1)
+
+
+class AMapValidationRequest(BaseModel):
+    """Request to record an AMap validation result."""
+
+    success: bool
+    error: str | None = None
+
+
+class AMapSettingsResponse(BaseModel):
+    """Redacted AMap settings metadata."""
+
+    configured: bool = False
+    validated: bool = False
+    key_fingerprint: str | None = None
+    last_validated_at: str | None = None
+    last_error: str | None = None
+    validation_generation: int = 0
+
+
+class AMapRuntimeConfigResponse(BaseModel):
+    """AMap runtime config for the local browser renderer."""
+
+    configured: bool
+    validated: bool = False
+    key: str | None = None
+    security_js_code: str | None = None
+    key_fingerprint: str | None = None
+
+
+class AMapRoutePoint(BaseModel):
+    """A route point for browser-side AMap rendering."""
+
+    lat: float
+    lon: float
+
+
+class AMapMapWidget(BaseModel):
+    """Preview map widget rectangle that can be replaced by AMap."""
+
+    name: str
+    type: str
+    x: int
+    y: int
+    width: int
+    height: int
+    zoom: int = 16
+    corner_radius: int = 0
+
+
+class AMapRenderContextRequest(BaseModel):
+    """Request for browser-side AMap overlay context."""
+
+    session_id: str
+    layout: str = "default-1920x1080"
+    frame_time_ms: int = Field(default=0, ge=0)
+    language: LanguageCode = DEFAULT_LANGUAGE
+
+
+class AMapRenderContextResponse(BaseModel):
+    """Route and widget geometry for browser-side AMap rendering."""
+
+    success: bool
+    provider: str = "amap"
+    canvas_width: int = 1920
+    canvas_height: int = 1080
+    route_points: list[AMapRoutePoint] = Field(default_factory=list)
+    map_widgets: list[AMapMapWidget] = Field(default_factory=list)
+    cache_key: str | None = None
+    message: str | None = None
+
+
+class AMapCacheClearResponse(BaseModel):
+    """Result of clearing AMap-specific cached state."""
+
+    success: bool
+    removed: bool = False
+    message: str
+
+
 class LocalFileDialogRequest(BaseModel):
     """Request to open a local file picker."""
 
@@ -328,6 +418,8 @@ class MapCacheWarmupResponse(BaseModel):
     route_points: int = 0
     rendered_maps: int = 0
     capped: bool = False
+    provider: str = "gopro-overlay"
+    cache_key: str | None = None
     message: str
 
 

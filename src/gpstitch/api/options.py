@@ -17,6 +17,7 @@ from gpstitch.services.localization import (
     localize_unit_options,
     normalize_language,
 )
+from gpstitch.services.amap_settings import AMAP_PROVIDER, amap_settings_service
 from gpstitch.services.renderer import (
     get_available_ffmpeg_profiles,
     get_available_map_styles,
@@ -51,12 +52,18 @@ async def get_map_styles(language: str = Query("zh-CN")) -> MapStylesResponse:
     """Get available map styles."""
     lang = normalize_language(language)
     styles = get_available_map_styles()
+    amap_settings = amap_settings_service.get_settings()
     return MapStylesResponse(
         styles=[
             MapStyleOption(
                 name=s["name"],
                 display_name=localize_map_style_name(s["name"], s["display_name"], lang),
                 requires_api_key=s.get("requires_api_key", False),
+                provider=s.get("provider", "gopro-overlay"),
+                requires_security_js_code=s.get("requires_security_js_code", False),
+                configured=amap_settings.configured if s.get("provider") == AMAP_PROVIDER else None,
+                validated=amap_settings.validated if s.get("provider") == AMAP_PROVIDER else None,
+                key_fingerprint=amap_settings.key_fingerprint if s.get("provider") == AMAP_PROVIDER else None,
             )
             for s in styles
         ]

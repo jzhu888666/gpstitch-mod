@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import logging
 import math
+import hashlib
+import json
+import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
 from gpstitch.config import settings
-from gpstitch.models.schemas import MapCacheWarmupResponse
+from gpstitch.models.schemas import AMapMapWidget, AMapRenderContextResponse, AMapRoutePoint, MapCacheWarmupResponse
+from gpstitch.services.amap_settings import (
+    AMAP_JSAPI_VERSION,
+    AMAP_PROVIDER,
+    amap_settings_service,
+    is_amap_style,
+)
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.localization import t
 
@@ -70,6 +79,28 @@ class MapCacheService:
         tiles, but this prepares the common journey and moving-map areas using
         the actual map widget sizes from the selected layout.
         """
+        if is_amap_style(map_style):
+            points = self.get_session_route_points(session_id)
+            cache_key = self._write_amap_descriptor(
+                session_id=session_id,
+                points=points,
+                widgets=self.get_layout_map_widgets(layout, layout_xml_path, language),
+                layout=layout,
+            )
+            return MapCacheWarmupResponse(
+                success=True,
+                cache_dir=str(self._amap_cache_dir()),
+                route_points=len(points),
+                rendered_maps=0,
+                capped=False,
+                provider=AMAP_PROVIDER,
+                cache_key=cache_key,
+                message=(
+                    "AMap JS API base-map resources are managed by the browser/provider; "
+                    "GPStitch prepared route overlay metadata only."
+                ),
+            )
+
         plan = _warmup_plan_for_layout(layout, layout_xml_path, language)
         if not plan.uses_maps:
             return MapCacheWarmupResponse(
@@ -150,6 +181,95 @@ class MapCacheService:
             return _points_from_gopro_video(path)
         return []
 
+    def build_amap_render_context(
+        self,
+        session_id: str,
+        layout: str | None = None,
+        frame_time_ms: int = 0,
+        language: str | None = None,
+    ) -> AMapRenderContextResponse:
+        """Build browser-side AMap overlay context for the selected layout."""
+        points = self.get_session_route_points(session_id)
+        widgets = self.get_layout_map_widgets(layout, language=language)
+        canvas_width, canvas_height = _layout_canvas_size(layout)
+        sampled_points = _sample_points(points, settings.map_cache_warmup_max_tiles)
+        cache_key = self._write_amap_descriptor(
+            session_id=session_id,
+            points=sampled_points,
+            widgets=widgets,
+            layout=layout,
+            frame_time_ms=frame_time_ms,
+        )
+        return AMapRenderContextResponse(
+            success=True,
+            provider=AMAP_PROVIDER,
+            canvas_width=canvas_width,
+            canvas_height=canvas_height,
+            route_points=[AMapRoutePoint(lat=p.lat, lon=p.lon) for p in sampled_points],
+            map_widgets=widgets,
+            cache_key=cache_key,
+            message="AMap overlay context prepared.",
+        )
+
+    def get_layout_map_widgets(
+        self,
+        layout: str | None,
+        layout_xml_path: str | None = None,
+        language: str | None = None,
+    ) -> list[AMapMapWidget]:
+        """Return map widget rectangles from a layout XML."""
+        root = _read_layout_root(layout, layout_xml_path, language)
+        if root is None:
+            return []
+        widgets: list[AMapMapWidget] = []
+        _collect_map_widgets(root, widgets)
+        return widgets
+
+    def clear_amap_cache(self) -> bool:
+        """Clear AMap-specific GPStitch cache entries without touching tile caches."""
+        cache_dir = self._amap_cache_dir()
+        if not cache_dir.exists():
+            return False
+        shutil.rmtree(cache_dir)
+        return True
+
+    def _amap_cache_dir(self) -> Path:
+        return self.cache_dir / "amap"
+
+    def _write_amap_descriptor(
+        self,
+        *,
+        session_id: str,
+        points: list[RoutePoint],
+        widgets: list[AMapMapWidget],
+        layout: str | None,
+        frame_time_ms: int = 0,
+    ) -> str:
+        cache_key = _amap_cache_key(
+            session_id=session_id,
+            points=points,
+            widgets=widgets,
+            layout=layout,
+            frame_time_ms=frame_time_ms,
+        )
+        target_dir = self._amap_cache_dir() / "descriptors"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        descriptor = {
+            "provider": AMAP_PROVIDER,
+            "amap_version": AMAP_JSAPI_VERSION,
+            "session_id": session_id,
+            "layout": layout,
+            "frame_time_ms": frame_time_ms,
+            "route_hash": _route_hash(points),
+            "credential_fingerprint": amap_settings_service.cache_fingerprint(),
+            "widgets": [w.model_dump() for w in widgets],
+        }
+        (target_dir / f"{cache_key}.json").write_text(
+            json.dumps(descriptor, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return cache_key
+
     def _render_route_extent(self, points: list[RoutePoint], map_style: str, size: int = 256) -> int:
         from gopro_overlay.geo import MapRenderer, MapStyler
         from gopro_overlay.vendor import geotiler
@@ -211,6 +331,34 @@ def _warmup_plan_for_layout(
     )
 
 
+def _collect_map_widgets(
+    elem: ET.Element,
+    widgets: list[AMapMapWidget],
+    offset_x: int = 0,
+    offset_y: int = 0,
+) -> None:
+    x = offset_x + _int_attr(elem, "x", 0)
+    y = offset_y + _int_attr(elem, "y", 0)
+    component_type = elem.attrib.get("type")
+    if elem.tag == "component" and component_type in {"moving_map", "journey_map", "moving_journey_map"}:
+        size = _int_attr(elem, "size", 256)
+        widgets.append(
+            AMapMapWidget(
+                name=elem.attrib.get("name") or component_type,
+                type=component_type,
+                x=x,
+                y=y,
+                width=_int_attr(elem, "width", size),
+                height=_int_attr(elem, "height", size),
+                zoom=_int_attr(elem, "zoom", 16),
+                corner_radius=_int_attr(elem, "corner_radius", _int_attr(elem, "cr", 0)),
+            )
+        )
+
+    for child in elem:
+        _collect_map_widgets(child, widgets, x, y)
+
+
 def _read_layout_root(
     layout: str | None,
     layout_xml_path: str | None = None,
@@ -227,6 +375,17 @@ def _read_layout_root(
     except Exception as e:
         logger.debug("Could not read map warmup layout %s/%s: %s", layout, layout_xml_path, e)
         return None
+
+
+def _layout_canvas_size(layout: str | None) -> tuple[int, int]:
+    if not layout:
+        return 1920, 1080
+    try:
+        from gpstitch.services.renderer import _parse_resolution
+
+        return _parse_resolution(layout)
+    except Exception:
+        return 1920, 1080
 
 
 def _int_attr(elem: ET.Element, attr: str, default: int) -> int:
@@ -275,6 +434,39 @@ def _sample_points(points: list[RoutePoint], limit: int) -> list[RoutePoint]:
         return [points[len(points) // 2]]
     step = (len(points) - 1) / (limit - 1)
     return [points[round(i * step)] for i in range(limit)]
+
+
+def _route_hash(points: list[RoutePoint]) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(len(points)).encode("ascii"))
+    for point in points:
+        digest.update(f"|{point.lat:.7f},{point.lon:.7f}".encode("ascii"))
+    return digest.hexdigest()[:16]
+
+
+def _amap_cache_key(
+    *,
+    session_id: str,
+    points: list[RoutePoint],
+    widgets: list[AMapMapWidget],
+    layout: str | None,
+    frame_time_ms: int,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(AMAP_PROVIDER.encode("ascii"))
+    digest.update(AMAP_JSAPI_VERSION.encode("ascii"))
+    digest.update(amap_settings_service.cache_fingerprint().encode("ascii"))
+    digest.update(session_id.encode("utf-8"))
+    digest.update(str(layout or "").encode("utf-8"))
+    digest.update(str(frame_time_ms).encode("ascii"))
+    digest.update(_route_hash(points).encode("ascii"))
+    for widget in widgets:
+        digest.update(
+            f"|{widget.name}:{widget.type}:{widget.x}:{widget.y}:{widget.width}:{widget.height}:{widget.zoom}".encode(
+                "utf-8"
+            )
+        )
+    return digest.hexdigest()[:24]
 
 
 def _bounds(points: list[RoutePoint]) -> tuple[float, float, float, float]:

@@ -567,6 +567,7 @@ def get_available_units() -> dict:
 def get_available_map_styles() -> list[dict]:
     """Get available map styles from gopro_overlay."""
     from gopro_overlay.geo import available_map_styles
+    from gpstitch.services.amap_settings import AMAP_MAP_STYLE, AMAP_PROVIDER
 
     # Map styles that require API keys (by prefix)
     API_KEY_PREFIXES = ["tf-", "geo-"]
@@ -585,8 +586,19 @@ def get_available_map_styles() -> list[dict]:
                 "name": style,
                 "display_name": display_name,
                 "requires_api_key": requires_api_key,
+                "provider": "gopro-overlay",
+                "requires_security_js_code": False,
             }
         )
+    result.append(
+        {
+            "name": AMAP_MAP_STYLE,
+            "display_name": "AMap JS API",
+            "requires_api_key": True,
+            "provider": AMAP_PROVIDER,
+            "requires_security_js_code": True,
+        }
+    )
     return result
 
 

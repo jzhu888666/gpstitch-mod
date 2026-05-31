@@ -38,3 +38,41 @@ async def test_warm_map_cache_runs_warmup_outside_request_event_loop(monkeypatch
     assert response.success is True
     assert service.warmup_thread_id is not None
     assert service.warmup_thread_id != request_thread_id
+
+
+def test_amap_cache_warmup_writes_only_descriptor_metadata(monkeypatch, temp_dir):
+    from gpstitch.services.map_cache import AMapMapWidget, MapCacheService, RoutePoint
+
+    service = MapCacheService(cache_dir=temp_dir / "maps")
+    monkeypatch.setattr(
+        service,
+        "get_session_route_points",
+        lambda session_id: [RoutePoint(lat=30.0, lon=120.0), RoutePoint(lat=30.1, lon=120.1)],
+    )
+    monkeypatch.setattr(
+        service,
+        "get_layout_map_widgets",
+        lambda *args, **kwargs: [
+            AMapMapWidget(name="moving_map", type="moving_map", x=100, y=100, width=256, height=256)
+        ],
+    )
+
+    response = service.warm_session_cache("session", map_style="amap-jsapi", layout="default-1920x1080")
+
+    assert response.success is True
+    assert response.provider == "amap"
+    assert response.rendered_maps == 0
+    assert list((temp_dir / "maps" / "amap" / "descriptors").glob("*.json"))
+    assert not list((temp_dir / "maps" / "amap").glob("*.png"))
+
+
+def test_layout_map_widgets_finds_two_default_drone_maps(temp_dir):
+    from gpstitch.services.map_cache import MapCacheService
+
+    service = MapCacheService(cache_dir=temp_dir / "maps")
+
+    widgets = service.get_layout_map_widgets("dji-drone-1920x1080")
+
+    assert [w.name for w in widgets] == ["moving_map", "journey_map"]
+    assert widgets[0].x == 1644
+    assert widgets[1].y == 376

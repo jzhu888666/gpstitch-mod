@@ -332,6 +332,12 @@ class RenderService:
             await self._start_next_pending_job()
 
         # Generate CLI command
+        from gpstitch.services.amap_settings import amap_fallback_message, backend_map_style, is_amap_style
+
+        if is_amap_style(config.map_style):
+            await job_manager.append_job_log(job_id, f"WARNING: {amap_fallback_message()}")
+            config = config.model_copy(update={"map_style": backend_map_style(config.map_style)})
+
         try:
             command, srt_gpx_temp_files = generate_cli_command(
                 session_id=config.session_id,

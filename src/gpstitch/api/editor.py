@@ -178,6 +178,7 @@ async def generate_preview(request: EditorPreviewRequest):
         Preview image as base64
     """
     try:
+        from gpstitch.services.amap_settings import backend_map_style
         from gpstitch.services.renderer import render_preview_from_layout
 
         # Get file path if session has uploaded file
@@ -208,7 +209,7 @@ async def generate_preview(request: EditorPreviewRequest):
             units_altitude=request.units_altitude,
             units_distance=request.units_distance,
             units_temperature=request.units_temperature,
-            map_style=request.map_style,
+            map_style=backend_map_style(request.map_style),
             gps_dop_max=request.gps_dop_max,
             gps_speed_max=request.gps_speed_max,
             gpx_path=gpx_path,

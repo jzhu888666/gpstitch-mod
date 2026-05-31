@@ -13,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from gpstitch import __version__
-from gpstitch.api import command, editor, layouts, local, map_cache, options, preview, render, templates, time_sync, upload
+from gpstitch.api import command, editor, layouts, local, map_cache, options, preview, render, settings as settings_api
+from gpstitch.api import templates, time_sync, upload
 from gpstitch.config import settings
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.job_manager import job_manager
@@ -104,6 +105,7 @@ def create_app() -> FastAPI:
     app.include_router(editor.router, tags=["editor"])
     app.include_router(local.router)
     app.include_router(map_cache.router)
+    app.include_router(settings_api.router)
 
     # Mount static files
     static_dir = Path(__file__).parent / "static"

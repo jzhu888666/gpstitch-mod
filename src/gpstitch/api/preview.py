@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from gpstitch.models.schemas import PreviewRequest, PreviewResponse
+from gpstitch.services.amap_settings import backend_map_style
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.renderer import image_to_base64, render_preview
 
@@ -47,7 +48,7 @@ async def generate_preview(request: PreviewRequest) -> PreviewResponse:
                 units_altitude=request.units_altitude,
                 units_distance=request.units_distance,
                 units_temperature=request.units_temperature,
-                map_style=request.map_style,
+                map_style=backend_map_style(request.map_style),
                 gps_dop_max=request.gps_dop_max,
                 gps_speed_max=request.gps_speed_max,
                 gpx_path=gpx_path,

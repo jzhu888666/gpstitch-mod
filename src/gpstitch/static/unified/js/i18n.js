@@ -235,8 +235,23 @@
         'All jobs finished': '所有任务已完成',
         'Starting next job...': '正在启动下一个任务...',
         'frames/s': '帧/秒',
+        'AMap JS API': '高德 JS API',
+        'AMap requires a validated key and security JS code.': '高德地图需要先验证 Key 和安全密钥。',
+        'AMap key and security JS code are required.': '请输入高德 Key 和安全密钥。',
+        'AMap credentials are not configured.': '尚未配置高德 Key 和安全密钥。',
+        'AMap settings saved': '高德配置已保存',
+        'AMap validation succeeded': '高德验证成功',
+        'AMap settings cleared': '高德配置已清除',
+        'Validated': '已验证',
+        'Validation Required': '需要验证',
+        'Setup Required': '需要配置',
+        'Not configured': '未配置',
+        'Saved key fingerprint': '已保存 Key 指纹',
+        'Enter AMap Web JSAPI key and security JS code.': '请输入高德 Web JSAPI Key 和安全密钥。',
+        'Web JSAPI key': 'Web JSAPI Key',
+        'Security JS code': '安全密钥',
+        'Validate': '验证',
     };
-
     const en = {};
     const reverseZh = Object.fromEntries(Object.entries(zh).map(([k, v]) => [v, k]));
 

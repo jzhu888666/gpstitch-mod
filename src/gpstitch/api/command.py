@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException
 
 from gpstitch.models.schemas import CommandRequest, CommandResponse
+from gpstitch.services.amap_settings import backend_map_style
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.renderer import generate_cli_command
 
@@ -38,7 +39,7 @@ async def generate_command(request: CommandRequest) -> CommandResponse:
         units_altitude=request.units_altitude,
         units_distance=request.units_distance,
         units_temperature=request.units_temperature,
-        map_style=request.map_style,
+        map_style=backend_map_style(request.map_style),
         gpx_merge_mode=gpx_merge_mode,
         video_time_alignment=video_time_alignment,
         ffmpeg_profile=request.ffmpeg_profile,
