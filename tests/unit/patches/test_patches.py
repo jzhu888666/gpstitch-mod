@@ -205,6 +205,39 @@ class TestFFMPEGOverlayVideoPatch:
         assert hasattr(overlay, "_timecode")
         assert overlay._timecode is None
 
+    def test_generate_resolves_overlay_size_filter_placeholders(self):
+        """Runtime overlay dimensions should be injected into FFmpeg profile filters."""
+        from gpstitch.patches import apply_patches
+
+        apply_patches()
+
+        from gopro_overlay.dimensions import Dimension
+        from gopro_overlay.ffmpeg_overlay import FFMPEGOptions, FFMPEGOverlayVideo
+
+        class FakeFFMPEG:
+            cmd = None
+
+            def execute(self, execution, cmd):
+                self.cmd = cmd
+                return [None]
+
+        fake_ffmpeg = FakeFFMPEG()
+        overlay = FFMPEGOverlayVideo(
+            ffmpeg=fake_ffmpeg,
+            input=Path("input.mp4"),
+            output=Path("output.mp4"),
+            overlay_size=Dimension(3840, 2160),
+            options=FFMPEGOptions(
+                filter_spec="[0:v]scale_cuda=w={overlay_width}:h={overlay_height}:format=yuv420p[out]"
+            ),
+        )
+
+        with overlay.generate():
+            pass
+
+        filter_index = fake_ffmpeg.cmd.index("-filter_complex") + 1
+        assert fake_ffmpeg.cmd[filter_index] == "[0:v]scale_cuda=w=3840:h=2160:format=yuv420p[out]"
+
 
 class TestMetricPatch:
     """Test metric_accessor_from patch for DJI camera metrics."""

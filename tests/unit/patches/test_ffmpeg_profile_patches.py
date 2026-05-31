@@ -34,7 +34,9 @@ def test_nnvgpu_profile_uses_cuda_overlay_upload_and_nvenc():
 
     assert nnvgpu["input"] == ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     assert "overlay_cuda" in nnvgpu["filter"]
+    assert "scale_cuda=w={overlay_width}:h={overlay_height}:format=yuv420p" in nnvgpu["filter"]
     assert "hwupload_cuda[overlay_stream]" in nnvgpu["filter"]
+    assert "crop={overlay_width}:{overlay_height}:0:0,hwupload_cuda" in nnvgpu["filter"]
     assert "hwupload[overlay_stream]" not in nnvgpu["filter"]
     assert _option_value(nnvgpu["output"], "-vcodec") == "h264_nvenc"
     assert _option_value(nnvgpu["output"], "-profile:v") == "main"

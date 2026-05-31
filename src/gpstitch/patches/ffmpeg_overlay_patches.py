@@ -66,6 +66,15 @@ def _extract_timecode_from_input(ffmpeg_exe, input_path) -> str | None:
     return None
 
 
+def _resolve_filter_placeholders(filter_complex: str, overlay_size) -> str:
+    """Resolve GPStitch profile placeholders that need runtime overlay dimensions."""
+    return (
+        filter_complex.replace("{overlay_width}", str(overlay_size.x)).replace(
+            "{overlay_height}", str(overlay_size.y)
+        )
+    )
+
+
 def patch_ffmpeg_overlay() -> None:
     """Patch FFMPEGOverlayVideo with timecode support and enhanced FFmpeg options."""
     from gopro_overlay.ffmpeg_overlay import FFMPEGOverlayVideo
@@ -136,7 +145,7 @@ def patch_ffmpeg_overlay() -> None:
         - Adds streaming optimization (-movflags +faststart+use_metadata_tags)
         - Adds timecode if provided (-timecode)
         """
-        filter_complex = self.options.filter_complex
+        filter_complex = _resolve_filter_placeholders(self.options.filter_complex, self.overlay_size)
 
         # Determine video output mapping
         # If filter ends with [name], use that as video map
