@@ -156,8 +156,8 @@ class TestGenerateCliCommand:
         assert cmd.startswith("gpstitch-dashboard ")
         assert "gopro-dashboard.py" not in cmd
 
-    def test_suppress_map_components_uses_no_map_layout_without_map_style(self, mock_file_manager):
-        """AMap backend render command should not pass an OSM map style or map layout."""
+    def test_amap_render_uses_wrapper_arg_without_map_style(self, mock_file_manager):
+        """AMap backend render command should use wrapper JSAPI rendering, not OSM map style."""
         from gpstitch.models.schemas import FileRole
         from gpstitch.services.renderer import generate_cli_command
 
@@ -172,12 +172,12 @@ class TestGenerateCliCommand:
             output_file="/tmp/output.mp4",
             layout="dji-drone-1920x1080",
             map_style="osm",
-            suppress_map_components=True,
+            amap_render=True,
         )
 
         assert "--map-style" not in cmd
-        assert "amap-jsapi-no-backend-map-v1" in cmd
-        assert "dji-drone-1920x1080.xml" not in cmd
+        assert "--ts-amap-render" in cmd
+        assert "dji-drone-1920x1080.xml" in cmd
 
     @patch("gpstitch.services.renderer._convert_srt_to_gpx", return_value="/tmp/converted.gpx")
     @patch("gpstitch.services.srt_parser.estimate_tz_offset", return_value=(0, "start"))
@@ -2082,6 +2082,37 @@ class TestWrapperArgsPreservedInCommandEndpoint:
             response = asyncio.run(generate_command(request))
 
         assert "--ts-dji-meta-source" in response.command
+
+    def test_amap_wrapper_arg_preserved(self, mock_deps, monkeypatch):
+        """Command endpoint should request AMap wrapper rendering for AMap style."""
+        import asyncio
+
+        from gpstitch.api.command import generate_command
+        from gpstitch.models.schemas import CommandRequest
+
+        captured = {}
+
+        def fake_generate_cli_command(**kwargs):
+            captured.update(kwargs)
+            return ("gpstitch-dashboard '/tmp/video.mov' '/tmp/output.mp4' --ts-amap-render", [])
+
+        monkeypatch.setattr("gpstitch.api.command.generate_cli_command", fake_generate_cli_command)
+        monkeypatch.setattr(
+            "gpstitch.api.command.amap_settings_service",
+            MagicMock(get_runtime_config=lambda: MagicMock(configured=True, validated=True)),
+        )
+
+        request = CommandRequest(
+            session_id="test-session",
+            layout="default-1920x1080",
+            output_filename="/tmp/output.mp4",
+            map_style="amap-jsapi",
+        )
+        response = asyncio.run(generate_command(request))
+
+        assert "--ts-amap-render" in response.command
+        assert captured["map_style"] is None
+        assert captured["amap_render"] is True
 
     def test_command_passed_through_unchanged(self, mock_deps):
         """Command endpoint should pass generate_cli_command output through without modification."""

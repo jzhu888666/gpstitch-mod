@@ -35,6 +35,7 @@ TS_SRT_SOURCE_ARG = "--ts-srt-source"
 TS_SRT_VIDEO_ARG = "--ts-srt-video"
 TS_ODO_OFFSET_ARG = "--ts-odo-offset"
 TS_DJI_META_SOURCE_ARG = "--ts-dji-meta-source"
+TS_AMAP_RENDER_ARG = "--ts-amap-render"
 
 
 def find_gopro_dashboard() -> Path | None:
@@ -79,7 +80,7 @@ def _extract_custom_args() -> dict:
     Returns:
         Dict with keys: srt_path, video_path, odo_offset. Values may be None.
     """
-    result = {"srt_path": None, "video_path": None, "odo_offset": None, "dji_meta_source": None}
+    result = {"srt_path": None, "video_path": None, "odo_offset": None, "dji_meta_source": None, "amap_render": False}
     new_argv = []
     i = 0
     while i < len(sys.argv):
@@ -100,6 +101,9 @@ def _extract_custom_args() -> dict:
         elif arg == TS_DJI_META_SOURCE_ARG and i + 1 < len(sys.argv):
             result["dji_meta_source"] = sys.argv[i + 1]
             i += 2
+        elif arg == TS_AMAP_RENDER_ARG:
+            result["amap_render"] = True
+            i += 1
         else:
             new_argv.append(arg)
             i += 1
@@ -139,6 +143,13 @@ def main():
 
         patch_calculate_odo(custom_args["odo_offset"])
         logger.info(f"Odo offset patch applied: {custom_args['odo_offset']} meters")
+
+    # Patch map widgets to render AMap JSAPI snapshots into final video frames.
+    if custom_args["amap_render"]:
+        from gpstitch.patches.amap_render_patches import patch_amap_jsapi_rendering
+
+        patch_amap_jsapi_rendering()
+        logger.info("AMap JSAPI render patch applied")
 
     # Find the original gopro-dashboard.py
     dashboard_script = find_gopro_dashboard()

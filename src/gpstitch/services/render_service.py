@@ -332,15 +332,21 @@ class RenderService:
             await self._start_next_pending_job()
 
         # Generate CLI command
-        from gpstitch.services.amap_settings import is_amap_style
+        from gpstitch.services.amap_settings import amap_settings_service, is_amap_style
 
-        suppress_map_components = is_amap_style(config.map_style)
-        command_map_style = None if suppress_map_components else config.map_style
-        if suppress_map_components:
+        amap_render = is_amap_style(config.map_style)
+        command_map_style = None if amap_render else config.map_style
+        if amap_render:
+            amap_runtime = amap_settings_service.get_runtime_config()
+            if not amap_runtime.configured or not amap_runtime.validated:
+                error = "AMap credentials must be configured and validated before video rendering."
+                await job_manager.append_job_log(job_id, f"ERROR: {error}")
+                await job_manager.update_job_status(job_id, JobStatus.FAILED, error)
+                await _clear_current_job()
+                return
             await job_manager.append_job_log(
                 job_id,
-                "INFO: AMap JSAPI is rendered in the browser preview; backend video render skips map widgets "
-                "instead of using a tile fallback.",
+                "INFO: AMap JSAPI video rendering enabled for map widgets.",
             )
 
         try:
@@ -361,7 +367,7 @@ class RenderService:
                 gps_speed_max=config.gps_speed_max,
                 odo_offset=config.odo_offset,
                 language=config.language,
-                suppress_map_components=suppress_map_components,
+                amap_render=amap_render,
             )
         except Exception as e:
             error_msg = f"Failed to generate command: {e}"

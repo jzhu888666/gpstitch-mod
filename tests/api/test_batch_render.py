@@ -159,6 +159,27 @@ class TestBatchRenderSharedGpx:
             assert secondary is None
 
     @pytest.mark.anyio
+    async def test_amap_map_style_applied_to_batch_jobs(self, async_client, batch_video_files):
+        """Batch render jobs should retain AMap style so the shared render path can use JSAPI."""
+        response = await async_client.post(
+            "/api/render/batch",
+            json={
+                "files": [{"video_path": str(v)} for v in batch_video_files],
+                "map_style": "amap-jsapi",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_jobs"] == 3
+
+        from gpstitch.services.job_manager import job_manager
+
+        for job_id in data["job_ids"]:
+            job = await job_manager.get_job(job_id)
+            assert job.config.map_style == "amap-jsapi"
+
+    @pytest.mark.anyio
     async def test_shared_gpx_nonexistent_file(self, async_client, batch_video_files):
         """Non-existent shared GPX should be silently skipped (warning logged)."""
         response = await async_client.post(

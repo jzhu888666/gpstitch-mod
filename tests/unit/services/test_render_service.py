@@ -412,9 +412,9 @@ class TestResolveMtimeForAlignment:
 
 
 class TestAmapRenderCommand:
-    """AMap final render should avoid backend tile fallback."""
+    """AMap final render should use backend JSAPI map rendering."""
 
-    async def test_amap_render_suppresses_map_components_without_warning(self, monkeypatch):
+    async def test_amap_render_enables_wrapper_without_warning(self, monkeypatch):
         from gpstitch.models.job import RenderJobConfig
         from gpstitch.services import render_service as render_service_module
 
@@ -429,10 +429,14 @@ class TestAmapRenderCommand:
             update_job_status=AsyncMock(),
             get_next_pending_job=AsyncMock(return_value=None),
         )
+        fake_amap_settings = SimpleNamespace(
+            get_runtime_config=lambda: SimpleNamespace(configured=True, validated=True)
+        )
         service = render_service_module.RenderService()
 
         monkeypatch.setattr(render_service_module, "generate_cli_command", fake_generate_cli_command)
         monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+        monkeypatch.setattr("gpstitch.services.amap_settings.amap_settings_service", fake_amap_settings)
         monkeypatch.setattr(service, "_find_gopro_dashboard", lambda: None)
 
         config = RenderJobConfig(
@@ -445,9 +449,11 @@ class TestAmapRenderCommand:
         await service.start_render("job-amap", config)
 
         assert captured["map_style"] is None
-        assert captured["suppress_map_components"] is True
+        assert captured["amap_render"] is True
+        assert not captured.get("suppress_map_components", False)
         log_lines = [call.args[1] for call in fake_job_manager.append_job_log.await_args_list]
         assert not any(line.startswith("WARNING:") for line in log_lines)
+        assert any("AMap JSAPI video rendering enabled" in line for line in log_lines)
 
 
 class TestNeedsPillarboxUsesSidecarCanvas:

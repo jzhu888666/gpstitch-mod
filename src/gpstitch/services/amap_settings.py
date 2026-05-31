@@ -32,7 +32,7 @@ def backend_map_style(map_style: str | None) -> str | None:
 
 
 def amap_fallback_message() -> str:
-    return "AMap JSAPI is browser-rendered in GPStitch preview; video render falls back to OSM."
+    return "AMap JSAPI is unavailable; GPStitch will use the configured non-AMap map path only when fallback is explicit."
 
 
 class AMapSettingsService:

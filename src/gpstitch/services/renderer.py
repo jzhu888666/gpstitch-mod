@@ -38,6 +38,7 @@ from gpstitch.constants import (
 from gpstitch.services.localization import normalize_language
 from gpstitch.scripts.gopro_dashboard_wrapper import (
     TS_DJI_META_SOURCE_ARG,
+    TS_AMAP_RENDER_ARG,
     TS_ODO_OFFSET_ARG,
     TS_SRT_SOURCE_ARG,
     TS_SRT_VIDEO_ARG,
@@ -1976,6 +1977,7 @@ def generate_cli_command(
     odo_offset: float | None = None,
     language: str = DEFAULT_LANGUAGE,
     suppress_map_components: bool = False,
+    amap_render: bool = False,
 ) -> tuple[str, list[str]]:
     """Generate the CLI command for full video processing.
 
@@ -2210,7 +2212,7 @@ def generate_cli_command(
     cmd_parts.append("--load ACCL GRAV CORI")
 
     # Always add map style if specified
-    if map_style and not suppress_map_components:
+    if map_style and not suppress_map_components and not amap_render:
         cmd_parts.append(f"--map-style {shlex.quote(map_style)}")
 
     # Add font option (auto-detect if Roboto-Medium.ttf is not available)
@@ -2244,5 +2246,8 @@ def generate_cli_command(
     # The wrapper strips this arg and patches calculate_odo() to start from offset.
     if odo_offset is not None:
         cmd_parts.append(f"{TS_ODO_OFFSET_ARG} {odo_offset:.3f}")
+
+    if amap_render:
+        cmd_parts.append(TS_AMAP_RENDER_ARG)
 
     return " ".join(cmd_parts), temp_files

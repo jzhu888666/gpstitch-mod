@@ -356,7 +356,18 @@ class TestExtractCustomArgs:
         assert result["srt_path"] is None
         assert result["video_path"] is None
         assert result["odo_offset"] is None
+        assert result["amap_render"] is False
         assert sys.argv == ["script", "--gpx", "track.gpx", "--layout", "default"]
+
+    def test_extracts_amap_render_flag(self, monkeypatch):
+        import sys
+
+        from gpstitch.scripts.gopro_dashboard_wrapper import _extract_custom_args
+
+        monkeypatch.setattr(sys, "argv", ["script", "--layout", "xml", "--ts-amap-render", "--gpx", "track.gpx"])
+        result = _extract_custom_args()
+        assert result["amap_render"] is True
+        assert sys.argv == ["script", "--layout", "xml", "--gpx", "track.gpx"]
 
     def test_extracts_args_at_end(self, monkeypatch):
         import sys
