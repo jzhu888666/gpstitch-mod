@@ -72,7 +72,7 @@ DEFAULT_LAYOUT_TRANSLATIONS = {
 
 DEFAULT_OSD_BASE_WIDTH = 1920
 DEFAULT_OSD_SCALE_ATTR = "gpstitch_osd_scale"
-DEFAULT_OSD_SCALE_VERSION = "v3"
+DEFAULT_OSD_SCALE_VERSION = "v4"
 DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
 DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
 DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
@@ -322,6 +322,7 @@ def _localized_default_layout_path(layout: str, language: str | None = None) -> 
     tree = ET.parse(source)
     root = tree.getroot()
     _remove_named_children(root, {"temperature", "cadence", "heartbeat"})
+    _configure_default_osd_datetime(root)
     _scale_default_osd_layout(root, layout, scale)
     translations = DEFAULT_LAYOUT_TRANSLATIONS.get(lang, {})
     for elem in root.iter("component"):
@@ -330,6 +331,33 @@ def _localized_default_layout_path(layout: str, language: str | None = None) -> 
 
     tree.write(target, encoding="utf-8", xml_declaration=False)
     return target
+
+
+def _configure_default_osd_datetime(root: ET.Element) -> None:
+    date_time = _find_root_layout_child(root, "date_and_time")
+    if date_time is None:
+        return
+
+    datetime_components = [
+        child
+        for child in date_time
+        if child.tag == "component" and child.attrib.get("type") == "datetime"
+    ]
+    if len(datetime_components) < 2:
+        return
+
+    date_component, time_component = datetime_components[:2]
+    date_component.set("format", "%Y/%m/%d {weekday_zh}")
+    date_component.set("size", "32")
+    date_component.set("y", "0")
+    date_component.set("timezone", "source")
+    date_component.attrib.pop("truncate", None)
+
+    time_component.set("format", "%H:%M:%S")
+    time_component.set("size", "32")
+    time_component.set("y", "40")
+    time_component.set("timezone", "source")
+    time_component.attrib.pop("truncate", None)
 
 
 def _default_osd_scale_for_layout(layout: str) -> float:
