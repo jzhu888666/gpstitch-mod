@@ -1,10 +1,13 @@
 """Tests for render command profile and DJI metadata handling."""
 
+import pytest
+
 from gpstitch.models.schemas import FileRole, VideoMetadata
 from gpstitch.scripts.gopro_dashboard_wrapper import TS_DJI_META_SOURCE_ARG
 
 
-def test_generate_cli_command_passes_nvgpu_profile(clean_file_manager, temp_dir, monkeypatch):
+@pytest.mark.parametrize("profile_name", ["nvgpu", "nnvgpu"])
+def test_generate_cli_command_passes_nvidia_cuda_profile(profile_name, clean_file_manager, temp_dir, monkeypatch):
     from gpstitch.services.renderer import generate_cli_command
 
     video = temp_dir / "video.mp4"
@@ -23,11 +26,11 @@ def test_generate_cli_command_passes_nvgpu_profile(clean_file_manager, temp_dir,
         session_id=session_id,
         output_file=str(temp_dir / "out.mp4"),
         layout="default-1920x1080",
-        ffmpeg_profile="nvgpu",
+        ffmpeg_profile=profile_name,
         language="en",
     )
 
-    assert "--profile nvgpu" in command
+    assert f"--profile {profile_name}" in command
     assert "layouts\\en" in command or "layouts/en" in command
 
 
