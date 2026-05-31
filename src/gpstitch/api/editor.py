@@ -178,7 +178,7 @@ async def generate_preview(request: EditorPreviewRequest):
         Preview image as base64
     """
     try:
-        from gpstitch.services.amap_settings import backend_map_style
+        from gpstitch.services.amap_settings import backend_map_style, is_amap_style
         from gpstitch.services.renderer import render_preview_from_layout
 
         # Get file path if session has uploaded file
@@ -216,6 +216,7 @@ async def generate_preview(request: EditorPreviewRequest):
             video_time_alignment=request.video_time_alignment,
             time_offset_seconds=request.time_offset_seconds,
             language=request.language,
+            suppress_map_components=is_amap_style(request.map_style),
         )
 
         logger.debug(

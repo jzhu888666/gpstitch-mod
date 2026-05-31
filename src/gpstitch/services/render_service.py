@@ -332,11 +332,16 @@ class RenderService:
             await self._start_next_pending_job()
 
         # Generate CLI command
-        from gpstitch.services.amap_settings import amap_fallback_message, backend_map_style, is_amap_style
+        from gpstitch.services.amap_settings import is_amap_style
 
-        if is_amap_style(config.map_style):
-            await job_manager.append_job_log(job_id, f"WARNING: {amap_fallback_message()}")
-            config = config.model_copy(update={"map_style": backend_map_style(config.map_style)})
+        suppress_map_components = is_amap_style(config.map_style)
+        command_map_style = None if suppress_map_components else config.map_style
+        if suppress_map_components:
+            await job_manager.append_job_log(
+                job_id,
+                "INFO: AMap JSAPI is rendered in the browser preview; backend video render skips map widgets "
+                "instead of using a tile fallback.",
+            )
 
         try:
             command, srt_gpx_temp_files = generate_cli_command(
@@ -348,7 +353,7 @@ class RenderService:
                 units_altitude=config.units_altitude,
                 units_distance=config.units_distance,
                 units_temperature=config.units_temperature,
-                map_style=config.map_style,
+                map_style=command_map_style,
                 gpx_merge_mode=config.gpx_merge_mode,
                 video_time_alignment=config.video_time_alignment,
                 ffmpeg_profile=config.ffmpeg_profile,
@@ -356,6 +361,7 @@ class RenderService:
                 gps_speed_max=config.gps_speed_max,
                 odo_offset=config.odo_offset,
                 language=config.language,
+                suppress_map_components=suppress_map_components,
             )
         except Exception as e:
             error_msg = f"Failed to generate command: {e}"

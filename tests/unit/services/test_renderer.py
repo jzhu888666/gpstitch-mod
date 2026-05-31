@@ -156,6 +156,29 @@ class TestGenerateCliCommand:
         assert cmd.startswith("gpstitch-dashboard ")
         assert "gopro-dashboard.py" not in cmd
 
+    def test_suppress_map_components_uses_no_map_layout_without_map_style(self, mock_file_manager):
+        """AMap backend render command should not pass an OSM map style or map layout."""
+        from gpstitch.models.schemas import FileRole
+        from gpstitch.services.renderer import generate_cli_command
+
+        primary = self._make_file_info("/tmp/video.mov", "video", FileRole.PRIMARY)
+
+        mock_file_manager.get_files.return_value = [primary]
+        mock_file_manager.get_primary_file.return_value = primary
+        mock_file_manager.get_secondary_file.return_value = None
+
+        cmd, _ = generate_cli_command(
+            session_id="test-session",
+            output_file="/tmp/output.mp4",
+            layout="dji-drone-1920x1080",
+            map_style="osm",
+            suppress_map_components=True,
+        )
+
+        assert "--map-style" not in cmd
+        assert "amap-jsapi-no-backend-map-v1" in cmd
+        assert "dji-drone-1920x1080.xml" not in cmd
+
     @patch("gpstitch.services.renderer._convert_srt_to_gpx", return_value="/tmp/converted.gpx")
     @patch("gpstitch.services.srt_parser.estimate_tz_offset", return_value=(0, "start"))
     def test_wrapper_args_present_when_srt_secondary(self, _mock_tz, _mock_convert, mock_file_manager):

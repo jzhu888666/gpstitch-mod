@@ -411,6 +411,45 @@ class TestResolveMtimeForAlignment:
         assert ts == 1723132380.0
 
 
+class TestAmapRenderCommand:
+    """AMap final render should avoid backend tile fallback."""
+
+    async def test_amap_render_suppresses_map_components_without_warning(self, monkeypatch):
+        from gpstitch.models.job import RenderJobConfig
+        from gpstitch.services import render_service as render_service_module
+
+        captured = {}
+
+        def fake_generate_cli_command(**kwargs):
+            captured.update(kwargs)
+            return "gpstitch-dashboard input.mp4 output.mp4 --layout xml --layout-xml no-map.xml", []
+
+        fake_job_manager = SimpleNamespace(
+            append_job_log=AsyncMock(),
+            update_job_status=AsyncMock(),
+            get_next_pending_job=AsyncMock(return_value=None),
+        )
+        service = render_service_module.RenderService()
+
+        monkeypatch.setattr(render_service_module, "generate_cli_command", fake_generate_cli_command)
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+        monkeypatch.setattr(service, "_find_gopro_dashboard", lambda: None)
+
+        config = RenderJobConfig(
+            session_id="test-session",
+            layout="dji-drone-1920x1080",
+            output_file="/tmp/output.mp4",
+            map_style="amap-jsapi",
+        )
+
+        await service.start_render("job-amap", config)
+
+        assert captured["map_style"] is None
+        assert captured["suppress_map_components"] is True
+        log_lines = [call.args[1] for call in fake_job_manager.append_job_log.await_args_list]
+        assert not any(line.startswith("WARNING:") for line in log_lines)
+
+
 class TestNeedsPillarboxUsesSidecarCanvas:
     """_needs_pillarbox must respect canvas dimensions from a custom XML template's sidecar
     JSON. Without this, a custom 4K 4:3 template (3840x2880) was treated as the default

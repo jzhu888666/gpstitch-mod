@@ -321,12 +321,11 @@ def _resolve_layout_path(layout: str, language: str | None = None) -> Path:
     return Path(layout)
 
 
-def _layout_without_map_components_path(layout: str, language: str | None = None) -> Path:
-    """Create or return a cached layout variant with map components removed."""
-    source = _resolve_layout_path(layout, language=language)
+def _layout_file_without_map_components_path(source: Path, name_hint: str, language: str | None = None) -> Path:
+    """Create or return a cached layout file variant with map components removed."""
     lang = normalize_language(language)
     source_key = hashlib.sha1(str(source.resolve()).encode("utf-8")).hexdigest()[:12]
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(layout).stem or source.stem)
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name_hint or source.stem)
     target_dir = settings.layout_cache_dir / _NO_BACKEND_MAP_LAYOUT_CACHE_DIR / lang
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{safe_name}-{source_key}.xml"
@@ -340,6 +339,24 @@ def _layout_without_map_components_path(layout: str, language: str | None = None
     tree.write(target, encoding="utf-8", xml_declaration=False)
     logger.debug("Created no-backend-map layout %s from %s; removed %d map components", target, source, removed)
     return target
+
+
+def _layout_without_map_components_path(layout: str, language: str | None = None) -> Path:
+    """Create or return a cached named layout variant with map components removed."""
+    source = _resolve_layout_path(layout, language=language)
+    return _layout_file_without_map_components_path(source, Path(layout).stem or source.stem, language=language)
+
+
+def _render_layout_without_map_components_path(
+    layout: str,
+    layout_xml_path: str | None = None,
+    language: str | None = None,
+) -> Path:
+    """Create or return the no-map layout file used by backend render commands."""
+    if layout_xml_path:
+        source = Path(layout_xml_path)
+        return _layout_file_without_map_components_path(source, source.stem, language=language)
+    return _layout_without_map_components_path(layout, language=language)
 
 
 def _xml_without_map_components(xml_content: str) -> str:
@@ -1958,6 +1975,7 @@ def generate_cli_command(
     gps_speed_max: float = DEFAULT_GPS_SPEED_MAX,
     odo_offset: float | None = None,
     language: str = DEFAULT_LANGUAGE,
+    suppress_map_components: bool = False,
 ) -> tuple[str, list[str]]:
     """Generate the CLI command for full video processing.
 
@@ -2146,11 +2164,17 @@ def generate_cli_command(
         if canvas_width and canvas_height:
             cmd_parts.append(f"--overlay-size {canvas_width}x{canvas_height}")
 
+    effective_layout_xml_path = layout_xml_path
+    if suppress_map_components:
+        effective_layout_xml_path = str(
+            _render_layout_without_map_components_path(layout, layout_xml_path=layout_xml_path, language=language)
+        )
+
     # Handle layout - either custom XML or predefined
-    if layout_xml_path:
+    if effective_layout_xml_path:
         # Custom template: use --layout xml --layout-xml <path>
         cmd_parts.append("--layout xml")
-        cmd_parts.append(f"--layout-xml {shlex.quote(layout_xml_path)}")
+        cmd_parts.append(f"--layout-xml {shlex.quote(effective_layout_xml_path)}")
     else:
         # Check if layout is a gpstitch custom layout (e.g. dji-drone-1920x1080)
         local_layout = _resolve_layout_path(layout, language=language)
@@ -2186,7 +2210,7 @@ def generate_cli_command(
     cmd_parts.append("--load ACCL GRAV CORI")
 
     # Always add map style if specified
-    if map_style:
+    if map_style and not suppress_map_components:
         cmd_parts.append(f"--map-style {shlex.quote(map_style)}")
 
     # Add font option (auto-detect if Roboto-Medium.ttf is not available)
