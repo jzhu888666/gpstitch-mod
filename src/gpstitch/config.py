@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     map_cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "maps"
     layout_cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "layouts"
     map_cache_warmup_max_tiles: int = 2048
+    # Keep render startup responsive. Frontend/background warmup can prefetch
+    # many tiles, while render itself should not block on network tile fetches.
+    map_cache_render_warmup_max_tiles: int = 0
 
     # Template storage directory
     templates_dir: Path = Path.home() / ".gpstitch" / "templates"

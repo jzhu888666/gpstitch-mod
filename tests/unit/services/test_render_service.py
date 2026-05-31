@@ -212,6 +212,69 @@ class TestFfmpegOutputDiagnostics:
         assert RenderService._read_ffmpeg_output_tail([f"FFMPEG Output is in {missing}"]) == []
 
 
+class TestMapCacheWarmupBeforeRender:
+    """Render startup should not block on large map tile warmups."""
+
+    async def test_warmup_is_skipped_when_render_limit_is_zero(self, monkeypatch):
+        from gpstitch.services import map_cache as map_cache_module
+        from gpstitch.services.render_service import RenderService
+
+        called = False
+
+        class WarmupService:
+            def warm_session_cache(self, **_kwargs):
+                nonlocal called
+                called = True
+                return SimpleNamespace(rendered_maps=1, capped=False, route_points=1)
+
+        monkeypatch.setattr("gpstitch.services.render_service.settings.map_cache_render_warmup_max_tiles", 0)
+        monkeypatch.setattr(map_cache_module, "map_cache_service", WarmupService())
+
+        await RenderService()._warm_map_cache_for_job(
+            "job-1",
+            SimpleNamespace(
+                session_id="session",
+                map_style="osm",
+                layout="default-1920x1080",
+                layout_xml_path=None,
+                language="en",
+            ),
+        )
+
+        assert called is False
+
+    async def test_warmup_uses_render_specific_tile_limit(self, monkeypatch):
+        from gpstitch.services import map_cache as map_cache_module
+        from gpstitch.services import render_service as render_service_module
+
+        calls = []
+
+        class WarmupService:
+            def warm_session_cache(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(rendered_maps=2, capped=True, route_points=20)
+
+        fake_job_manager = SimpleNamespace(append_job_log=AsyncMock())
+        monkeypatch.setattr(render_service_module.settings, "map_cache_render_warmup_max_tiles", 5)
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+        monkeypatch.setattr(map_cache_module, "map_cache_service", WarmupService())
+
+        await render_service_module.RenderService()._warm_map_cache_for_job(
+            "job-1",
+            SimpleNamespace(
+                session_id="session",
+                map_style="osm",
+                layout="default-1920x1080",
+                layout_xml_path=None,
+                language="en",
+            ),
+        )
+
+        assert calls
+        assert calls[0]["max_tiles"] == 5
+        fake_job_manager.append_job_log.assert_awaited_once()
+
+
 class TestResolveMtimeForAlignment:
     """Tests for _resolve_mtime_for_alignment method."""
 

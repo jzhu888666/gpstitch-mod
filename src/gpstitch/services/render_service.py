@@ -552,6 +552,11 @@ class RenderService:
 
     async def _warm_map_cache_for_job(self, job_id: str, config: RenderJobConfig) -> None:
         """Best-effort map cache warmup immediately before the render subprocess starts."""
+        max_tiles = settings.map_cache_render_warmup_max_tiles
+        if max_tiles <= 0:
+            logger.info("Skipping map cache warmup before render for job %s; disabled by config", job_id)
+            return
+
         try:
             from gpstitch.services.map_cache import map_cache_service
 
@@ -562,6 +567,7 @@ class RenderService:
                 layout=config.layout,
                 layout_xml_path=config.layout_xml_path,
                 language=config.language,
+                max_tiles=max_tiles,
             )
             if result.rendered_maps <= 0:
                 return

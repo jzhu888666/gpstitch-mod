@@ -62,6 +62,7 @@ class MapCacheService:
         layout: str | None = None,
         layout_xml_path: str | None = None,
         language: str | None = None,
+        max_tiles: int | None = None,
     ) -> MapCacheWarmupResponse:
         """Warm map cache tiles for a session route.
 
@@ -85,13 +86,14 @@ class MapCacheService:
                 message=t("map_cache_no_route", language),
             )
 
-        max_tiles = max(1, settings.map_cache_warmup_max_tiles)
+        tile_limit = settings.map_cache_warmup_max_tiles if max_tiles is None else max_tiles
+        tile_limit = max(1, tile_limit)
         rendered_maps = 0
         samples: list[RoutePoint] = []
 
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            remaining_tiles = max_tiles
+            remaining_tiles = tile_limit
             if plan.warm_journey:
                 rendered_maps += self._render_route_extent(points, map_style, plan.journey_size)
                 remaining_tiles = max(0, remaining_tiles - _estimate_square_tile_count(plan.journey_size))
