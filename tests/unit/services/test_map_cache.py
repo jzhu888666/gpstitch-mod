@@ -1,7 +1,7 @@
 """Tests for project-local map cache warmup."""
 
 from gpstitch.models.schemas import FileRole
-from gpstitch.services.map_cache import MapCacheService, RoutePoint
+from gpstitch.services.map_cache import MapCacheService, MovingMapWarmupSpec, RoutePoint
 
 
 def test_map_cache_service_creates_cache_dir(temp_dir):
@@ -45,9 +45,9 @@ def test_warm_session_cache_is_bounded(temp_dir, monkeypatch):
     moving_windows = []
 
     monkeypatch.setattr(service, "get_session_route_points", lambda session_id: points)
-    monkeypatch.setattr(service, "_render_route_extent", lambda route, style: 1)
+    monkeypatch.setattr(service, "_render_route_extent", lambda route, style, size=256: 1)
 
-    def render_moving_window(point, style):
+    def render_moving_window(point, style, spec=MovingMapWarmupSpec()):
         moving_windows.append(point)
         return 1
 
@@ -60,3 +60,32 @@ def test_warm_session_cache_is_bounded(temp_dir, monkeypatch):
     assert result.rendered_maps == 3
     assert result.capped is True
     assert len(moving_windows) == 2
+
+
+def test_warm_session_cache_uses_layout_map_dimensions(temp_dir, monkeypatch):
+    service = MapCacheService(cache_dir=temp_dir / "maps")
+    points = [RoutePoint(lat=30.0 + i * 0.001, lon=100.0 + i * 0.001) for i in range(3)]
+    moving_specs = []
+    route_sizes = []
+
+    monkeypatch.setattr(service, "get_session_route_points", lambda session_id: points)
+
+    def render_route_extent(route, style, size=256):
+        route_sizes.append(size)
+        return 1
+
+    def render_moving_window(point, style, spec=MovingMapWarmupSpec()):
+        moving_specs.append(spec)
+        return 1
+
+    monkeypatch.setattr(service, "_render_route_extent", render_route_extent)
+    monkeypatch.setattr(service, "_render_moving_window", render_moving_window)
+    monkeypatch.setattr("gpstitch.services.map_cache.settings.map_cache_warmup_max_tiles", 512)
+
+    result = service.warm_session_cache("session", map_style="osm", layout="default-3840x2160", language="en")
+
+    assert result.success is True
+    assert route_sizes == [512]
+    assert moving_specs
+    assert moving_specs[0].size == 512
+    assert moving_specs[0].render_size == 724

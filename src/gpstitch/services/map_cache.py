@@ -22,6 +22,32 @@ class RoutePoint:
     lon: float
 
 
+@dataclass(frozen=True)
+class MovingMapWarmupSpec:
+    size: int = 256
+    zoom: int = 16
+
+    @property
+    def render_size(self) -> int:
+        return int(math.sqrt((self.size**2) * 2))
+
+    @property
+    def estimated_tile_count(self) -> int:
+        tiles_per_axis = max(1, math.ceil(self.render_size / 256) + 1)
+        return tiles_per_axis * tiles_per_axis
+
+
+@dataclass(frozen=True)
+class MapWarmupPlan:
+    moving_maps: tuple[MovingMapWarmupSpec, ...] = (MovingMapWarmupSpec(),)
+    warm_journey: bool = True
+    journey_size: int = 256
+
+    @property
+    def uses_maps(self) -> bool:
+        return self.warm_journey or bool(self.moving_maps)
+
+
 class MapCacheService:
     """Warm and expose the map cache used by previews and render subprocesses."""
 
@@ -33,13 +59,24 @@ class MapCacheService:
         self,
         session_id: str,
         map_style: str = "osm",
+        layout: str | None = None,
+        layout_xml_path: str | None = None,
         language: str | None = None,
     ) -> MapCacheWarmupResponse:
         """Warm map cache tiles for a session route.
 
         This is intentionally bounded. Preview/render still lazily fetch missing
-        tiles, but this prepares the common journey and moving-map areas.
+        tiles, but this prepares the common journey and moving-map areas using
+        the actual map widget sizes from the selected layout.
         """
+        plan = _warmup_plan_for_layout(layout, layout_xml_path, language)
+        if not plan.uses_maps:
+            return MapCacheWarmupResponse(
+                success=True,
+                cache_dir=str(self.cache_dir),
+                message=t("map_cache_warmed", language),
+            )
+
         points = self.get_session_route_points(session_id)
         if not points:
             return MapCacheWarmupResponse(
@@ -49,17 +86,25 @@ class MapCacheService:
             )
 
         max_tiles = max(1, settings.map_cache_warmup_max_tiles)
-        max_maps = max(1, max_tiles // 9)
         rendered_maps = 0
-        capped = len(points) > max_maps
+        samples: list[RoutePoint] = []
 
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            rendered_maps += self._render_route_extent(points, map_style)
+            remaining_tiles = max_tiles
+            if plan.warm_journey:
+                rendered_maps += self._render_route_extent(points, map_style, plan.journey_size)
+                remaining_tiles = max(0, remaining_tiles - _estimate_square_tile_count(plan.journey_size))
 
-            samples = _sample_points(points, max(0, max_maps - rendered_maps))
+            moving_tile_cost = sum(spec.estimated_tile_count for spec in plan.moving_maps)
+            sample_limit = max(0, remaining_tiles // max(1, moving_tile_cost)) if plan.moving_maps else 0
+            distinct_moving_points = _distinct_moving_window_points(points, plan.moving_maps)
+            samples = _sample_points(distinct_moving_points, sample_limit)
             for point in samples:
-                rendered_maps += self._render_moving_window(point, map_style)
+                for spec in plan.moving_maps:
+                    rendered_maps += self._render_moving_window(point, map_style, spec)
+
+            capped = bool(plan.moving_maps) and len(samples) < len(distinct_moving_points)
 
             return MapCacheWarmupResponse(
                 success=True,
@@ -76,7 +121,7 @@ class MapCacheService:
                 cache_dir=str(self.cache_dir),
                 route_points=len(points),
                 rendered_maps=rendered_maps,
-                capped=capped,
+                capped=bool(samples) and len(samples) < len(points),
                 message=f"{t('map_cache_failed', language)}: {e}",
             )
 
@@ -103,7 +148,7 @@ class MapCacheService:
             return _points_from_gopro_video(path)
         return []
 
-    def _render_route_extent(self, points: list[RoutePoint], map_style: str) -> int:
+    def _render_route_extent(self, points: list[RoutePoint], map_style: str, size: int = 256) -> int:
         from gopro_overlay.geo import MapRenderer, MapStyler
         from gopro_overlay.vendor import geotiler
 
@@ -111,21 +156,112 @@ class MapCacheService:
         if math.isclose(min_lat, max_lat) and math.isclose(min_lon, max_lon):
             return self._render_moving_window(points[0], map_style)
 
-        route_map = geotiler.Map(extent=(min_lon, min_lat, max_lon, max_lat), size=(512, 512))
+        route_map = geotiler.Map(extent=(min_lon, min_lat, max_lon, max_lat), size=(size, size))
         if route_map.zoom > 18:
             route_map.zoom = 18
         with MapRenderer(self.cache_dir, MapStyler()).open(map_style) as renderer:
             renderer(route_map)
         return 1
 
-    def _render_moving_window(self, point: RoutePoint, map_style: str) -> int:
+    def _render_moving_window(
+        self,
+        point: RoutePoint,
+        map_style: str,
+        spec: MovingMapWarmupSpec = MovingMapWarmupSpec(),
+    ) -> int:
         from gopro_overlay.geo import MapRenderer, MapStyler
         from gopro_overlay.vendor import geotiler
 
-        moving_map = geotiler.Map(center=(point.lon, point.lat), zoom=16, size=(384, 384))
+        render_size = spec.render_size
+        moving_map = geotiler.Map(center=(point.lon, point.lat), zoom=spec.zoom, size=(render_size, render_size))
         with MapRenderer(self.cache_dir, MapStyler()).open(map_style) as renderer:
             renderer(moving_map)
         return 1
+
+
+def _warmup_plan_for_layout(
+    layout: str | None,
+    layout_xml_path: str | None = None,
+    language: str | None = None,
+) -> MapWarmupPlan:
+    root = _read_layout_root(layout, layout_xml_path, language)
+    if root is None:
+        return MapWarmupPlan()
+
+    moving_specs: list[MovingMapWarmupSpec] = []
+    journey_sizes: list[int] = []
+    for elem in root.iter("component"):
+        component_type = elem.attrib.get("type")
+        if component_type in {"moving_map", "moving_journey_map"}:
+            moving_specs.append(
+                MovingMapWarmupSpec(
+                    size=_int_attr(elem, "size", 256),
+                    zoom=_int_attr(elem, "zoom", 16),
+                )
+            )
+        elif component_type == "journey_map":
+            journey_sizes.append(_int_attr(elem, "size", 256))
+
+    return MapWarmupPlan(
+        moving_maps=tuple(dict.fromkeys(moving_specs)),
+        warm_journey=bool(journey_sizes),
+        journey_size=max(journey_sizes, default=256),
+    )
+
+
+def _read_layout_root(
+    layout: str | None,
+    layout_xml_path: str | None = None,
+    language: str | None = None,
+) -> ET.Element | None:
+    try:
+        if layout_xml_path:
+            return ET.parse(layout_xml_path).getroot()
+        if not layout:
+            return None
+        from gpstitch.services.renderer import _resolve_layout_path
+
+        return ET.parse(_resolve_layout_path(layout, language=language)).getroot()
+    except Exception as e:
+        logger.debug("Could not read map warmup layout %s/%s: %s", layout, layout_xml_path, e)
+        return None
+
+
+def _int_attr(elem: ET.Element, attr: str, default: int) -> int:
+    try:
+        return int(elem.attrib.get(attr, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _estimate_square_tile_count(size: int) -> int:
+    tiles_per_axis = max(1, math.ceil(size / 256) + 1)
+    return tiles_per_axis * tiles_per_axis
+
+
+def _distinct_moving_window_points(
+    points: list[RoutePoint],
+    specs: tuple[MovingMapWarmupSpec, ...],
+) -> list[RoutePoint]:
+    selected: list[RoutePoint] = []
+    seen = set()
+    for point in points:
+        key = tuple(_moving_window_key(point, spec) for spec in specs)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(point)
+    return selected
+
+
+def _moving_window_key(point: RoutePoint, spec: MovingMapWarmupSpec):
+    from gopro_overlay.vendor import geotiler
+    from gopro_overlay.vendor.geotiler.map import _find_top_left_tile, _tile_coords
+
+    render_size = spec.render_size
+    moving_map = geotiler.Map(center=(point.lon, point.lat), zoom=spec.zoom, size=(render_size, render_size))
+    coord, offset = _find_top_left_tile(moving_map)
+    return (moving_map.zoom, tuple(_tile_coords(moving_map, coord, offset)))
 
 
 def _sample_points(points: list[RoutePoint], limit: int) -> list[RoutePoint]:

@@ -379,6 +379,8 @@ class RenderService:
             await _clear_current_job()
             return
 
+        await self._warm_map_cache_for_job(job_id, config)
+
         # Find gopro-dashboard.py location
         gopro_dashboard = self._find_gopro_dashboard()
         if not gopro_dashboard:
@@ -547,6 +549,30 @@ class RenderService:
                 self._current_job_id = None
             # Auto-start next pending job if exists (for batch processing)
             await self._start_next_pending_job()
+
+    async def _warm_map_cache_for_job(self, job_id: str, config: RenderJobConfig) -> None:
+        """Best-effort map cache warmup immediately before the render subprocess starts."""
+        try:
+            from gpstitch.services.map_cache import map_cache_service
+
+            result = await asyncio.to_thread(
+                map_cache_service.warm_session_cache,
+                session_id=config.session_id,
+                map_style=config.map_style or "osm",
+                layout=config.layout,
+                layout_xml_path=config.layout_xml_path,
+                language=config.language,
+            )
+            if result.rendered_maps <= 0:
+                return
+            status = "partial" if result.capped else "ready"
+            await job_manager.append_job_log(
+                job_id,
+                f"Map cache {status}: {result.rendered_maps} map windows warmed from {result.route_points} route points",
+            )
+        except Exception as e:
+            logger.warning("Map cache warmup before render failed for job %s: %s", job_id, e)
+            await job_manager.append_job_log(job_id, f"Map cache warmup skipped: {e}")
 
     async def _start_next_pending_job(self):
         """Start the next pending job in queue if exists (with lock protection)."""

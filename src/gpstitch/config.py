@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache"
     map_cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "maps"
     layout_cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "layouts"
-    map_cache_warmup_max_tiles: int = 64
+    map_cache_warmup_max_tiles: int = 2048
 
     # Template storage directory
     templates_dir: Path = Path.home() / ".gpstitch" / "templates"

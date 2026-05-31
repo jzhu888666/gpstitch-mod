@@ -15,7 +15,7 @@ async def test_warm_map_cache_runs_warmup_outside_request_event_loop(monkeypatch
     class WarmupService:
         warmup_thread_id: int | None = None
 
-        def warm_session_cache(self, session_id, map_style, language):
+        def warm_session_cache(self, session_id, map_style, layout, language):
             self.warmup_thread_id = threading.get_ident()
             asyncio.run(asyncio.sleep(0))
             return MapCacheWarmupResponse(

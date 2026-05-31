@@ -20,5 +20,6 @@ async def warm_map_cache(request: MapCacheWarmupRequest) -> MapCacheWarmupRespon
         map_cache_service.warm_session_cache,
         session_id=request.session_id,
         map_style=request.map_style,
+        layout=request.layout,
         language=request.language,
     )
