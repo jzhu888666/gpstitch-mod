@@ -81,6 +81,7 @@ Desktop.ini
 *.log
 .gpstitch/
 .gpstitch-cache/
+openspec/
 temp/
 
 # uv
