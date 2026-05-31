@@ -9,10 +9,12 @@ import math
 import os
 import re
 import tempfile
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from gpstitch.config import settings
 from gpstitch.models.schemas import AMapRuntimeConfigResponse
@@ -20,9 +22,19 @@ from gpstitch.services.amap_settings import AMAP_JSAPI_VERSION
 
 logger = logging.getLogger(__name__)
 
+MOVING_MAP_GRID_PIXELS = 16
+DEFAULT_MARKER_RADIUS = 7
+DEFAULT_MARKER_OUTLINE_WIDTH = 2
+
 
 class AMapRenderError(RuntimeError):
     """Raised when backend AMap JSAPI rendering cannot produce a snapshot."""
+
+
+@dataclass(frozen=True)
+class AMapSnapshot:
+    image: Image.Image
+    metadata: dict[str, Any]
 
 
 class AMapJSAPISnapshotRenderer:
@@ -33,6 +45,7 @@ class AMapJSAPISnapshotRenderer:
         runtime_config: AMapRuntimeConfigResponse,
         cache_dir: Path | None = None,
         timeout_ms: int = 20000,
+        max_memory_snapshots: int = 128,
     ) -> None:
         if not runtime_config.configured or not runtime_config.validated:
             raise AMapRenderError("AMap credentials must be configured and validated before video rendering.")
@@ -41,8 +54,10 @@ class AMapJSAPISnapshotRenderer:
 
         self.runtime_config = runtime_config
         self.timeout_ms = timeout_ms
+        self.max_memory_snapshots = max(0, int(max_memory_snapshots))
         self.cache_dir = cache_dir or settings.map_cache_dir / "amap" / "render-snapshots"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._memory_cache: OrderedDict[str, AMapSnapshot] = OrderedDict()
         self._playwright = None
         self._browser = None
         self._context = None
@@ -76,17 +91,21 @@ class AMapJSAPISnapshotRenderer:
         marker_fill: tuple[int, int, int] = (0, 0, 255),
         marker_outline: tuple[int, int, int] = (0, 0, 0),
     ) -> Image.Image:
+        current = _to_amap_point(lat, lon)
+        center = _quantize_point(current, int(zoom), MOVING_MAP_GRID_PIXELS)
         options = {
-            "kind": "moving",
+            "kind": "moving-base",
             "size": int(size),
             "zoom": int(zoom),
-            "center": _to_amap_point(lat, lon),
-            "current": _to_amap_point(lat, lon),
+            "center": center,
             "route": [],
-            "markerFill": _rgb(marker_fill),
-            "markerOutline": _rgb(marker_outline),
+            "drawMarker": False,
         }
-        return self._render_cached(options)
+        snapshot = self._render_cached_snapshot(options)
+        frame = snapshot.image.copy()
+        marker_xy = _project_point(current, center, int(zoom), int(size))
+        _draw_marker(frame, marker_xy, marker_fill, marker_outline)
+        return frame
 
     def render_journey(
         self,
@@ -102,38 +121,80 @@ class AMapJSAPISnapshotRenderer:
         route = _sample_route(route, 600)
         current_point = _to_amap_point(current[0], current[1])
         options = {
-            "kind": "journey",
+            "kind": "journey-base",
             "size": int(size),
             "zoom": 16,
-            "center": current_point,
-            "current": current_point,
             "route": [_to_amap_point(lat, lon) for lat, lon in route],
             "lineFill": _rgb(line_fill),
             "lineWidth": int(line_width),
-            "markerFill": _rgb(marker_fill),
-            "markerOutline": _rgb(marker_outline),
+            "drawMarker": False,
         }
-        return self._render_cached(options)
+        snapshot = self._render_cached_snapshot(options)
+        center = snapshot.metadata.get("center")
+        zoom = snapshot.metadata.get("zoom")
+        frame = snapshot.image.copy()
+        if _valid_amap_point(center) and isinstance(zoom, int | float):
+            marker_xy = _project_point(current_point, center, float(zoom), int(size))
+            _draw_marker(frame, marker_xy, marker_fill, marker_outline)
+        else:
+            _draw_marker(frame, (int(size / 2), int(size / 2)), marker_fill, marker_outline)
+        return frame
 
     def _render_cached(self, options: dict[str, Any]) -> Image.Image:
-        cache_key = self._cache_key(options)
-        target = self.cache_dir / f"{cache_key}.png"
-        if target.exists():
-            return Image.open(target).convert("RGBA")
+        return self._render_cached_snapshot(options).image
 
-        image = self._render_snapshot(options)
+    def _render_cached_snapshot(self, options: dict[str, Any]) -> AMapSnapshot:
+        cache_key = self._cache_key(options)
+        memory_snapshot = self._get_memory_snapshot(cache_key)
+        if memory_snapshot is not None:
+            return memory_snapshot
+
+        target = self.cache_dir / f"{cache_key}.png"
+        metadata_target = self.cache_dir / f"{cache_key}.json"
+        if target.exists() and metadata_target.exists():
+            metadata = _read_json(metadata_target)
+            snapshot = AMapSnapshot(Image.open(target).convert("RGBA"), metadata)
+            self._store_memory_snapshot(cache_key, snapshot)
+            return snapshot
+
+        snapshot = self._render_snapshot(options)
         fd, temp_name = tempfile.mkstemp(prefix=f"{cache_key}.", suffix=".png", dir=self.cache_dir)
         os.close(fd)
         temp_path = Path(temp_name)
+        metadata_temp_path = self.cache_dir / f"{cache_key}.json.tmp"
         try:
-            image.save(temp_path, format="PNG")
+            snapshot.image.save(temp_path, format="PNG")
+            metadata_temp_path.write_text(
+                json.dumps(snapshot.metadata, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
             temp_path.replace(target)
+            metadata_temp_path.replace(metadata_target)
         finally:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
-        return image
+            if metadata_temp_path.exists():
+                metadata_temp_path.unlink(missing_ok=True)
+        self._store_memory_snapshot(cache_key, snapshot)
+        return snapshot
 
-    def _render_snapshot(self, options: dict[str, Any]) -> Image.Image:
+    def _get_memory_snapshot(self, cache_key: str) -> AMapSnapshot | None:
+        if self.max_memory_snapshots <= 0:
+            return None
+        snapshot = self._memory_cache.get(cache_key)
+        if snapshot is not None:
+            self._memory_cache.move_to_end(cache_key)
+        return snapshot
+
+    def _store_memory_snapshot(self, cache_key: str, snapshot: AMapSnapshot) -> None:
+        if self.max_memory_snapshots <= 0:
+            return
+        self._memory_cache[cache_key] = snapshot
+        self._memory_cache.move_to_end(cache_key)
+        while len(self._memory_cache) > self.max_memory_snapshots:
+            self._memory_cache.popitem(last=False)
+
+    def _render_snapshot(self, options: dict[str, Any]) -> AMapSnapshot:
         page = self._ensure_page()
         try:
             result = page.evaluate("async (options) => await window.renderAmapSnapshot(options)", options)
@@ -144,7 +205,7 @@ class AMapJSAPISnapshotRenderer:
             raise
         except Exception as e:
             raise AMapRenderError(f"AMap snapshot rendering failed: {e}") from e
-        return _image_from_png(png_bytes)
+        return AMapSnapshot(_image_from_png(png_bytes), result.get("metadata") or {})
 
     def _ensure_page(self):
         if self._page is not None:
@@ -188,7 +249,7 @@ class AMapJSAPISnapshotRenderer:
     def _cache_key(self, options: dict[str, Any]) -> str:
         payload = {
             "version": AMAP_JSAPI_VERSION,
-            "renderer": "gcj02-local-v1",
+            "renderer": "gcj02-local-marker-cache-v1",
             "fingerprint": self.runtime_config.key_fingerprint,
             "options": options,
         }
@@ -248,6 +309,14 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
       return [point.lng, point.lat];
     }}
 
+    function fromLngLat(location) {{
+      if (Array.isArray(location)) return {{ lng: location[0], lat: location[1] }};
+      if (location && typeof location.getLng === 'function' && typeof location.getLat === 'function') {{
+        return {{ lng: location.getLng(), lat: location.getLat() }};
+      }}
+      return {{ lng: location.lng, lat: location.lat }};
+    }}
+
     function waitMapComplete(map) {{
       return new Promise(resolve => {{
         let done = false;
@@ -279,9 +348,10 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
           activeMap = null;
         }}
 
+        const explicitCenter = options.center ? toLngLat(options.center) : null;
         const current = options.current ? toLngLat(options.current) : null;
         const route = (options.route || []).map(toLngLat);
-        const center = current || route[0] || [116.397428, 39.90923];
+        const center = explicitCenter || current || route[0] || [116.397428, 39.90923];
 
         const map = new AMap.Map(mapEl, {{
           viewMode: '2D',
@@ -306,7 +376,7 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
           map.add(polyline);
           overlays.push(polyline);
         }}
-        if (current) {{
+        if (current && options.drawMarker !== false) {{
           const marker = new AMap.Marker({{
             position: current,
             anchor: 'center',
@@ -317,16 +387,25 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
           overlays.push(marker);
         }}
 
-        if (options.kind === 'journey' && overlays.length > 0) {{
+        if (String(options.kind || '').startsWith('journey') && overlays.length > 0) {{
           map.setFitView(overlays, false, [16, 16, 16, 16]);
         }} else if (current) {{
           map.setCenter(current);
+          map.setZoom(options.zoom || 16);
+        }} else if (explicitCenter) {{
+          map.setCenter(explicitCenter);
           map.setZoom(options.zoom || 16);
         }}
 
         await waitMapComplete(map);
         await sleep(650);
-        return {{ ok: true }};
+        return {{
+          ok: true,
+          metadata: {{
+            center: fromLngLat(map.getCenter()),
+            zoom: map.getZoom()
+          }}
+        }};
       }} catch (error) {{
         return {{ ok: false, error: String(error && error.message ? error.message : error) }};
       }}
@@ -342,6 +421,14 @@ def _image_from_png(png_bytes: bytes) -> Image.Image:
     return Image.open(BytesIO(png_bytes)).convert("RGBA")
 
 
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _sample_route(route: list[tuple[float, float]], limit: int) -> list[tuple[float, float]]:
     if len(route) <= limit:
         return route
@@ -352,6 +439,64 @@ def _sample_route(route: list[tuple[float, float]], limit: int) -> list[tuple[fl
 def _to_amap_point(lat: float, lon: float) -> dict[str, float]:
     gcj_lat, gcj_lon = _wgs84_to_gcj02(float(lat), float(lon))
     return {"lat": gcj_lat, "lng": gcj_lon}
+
+
+def _valid_amap_point(point: Any) -> bool:
+    return isinstance(point, dict) and isinstance(point.get("lat"), int | float) and isinstance(point.get("lng"), int | float)
+
+
+def _quantize_point(point: dict[str, float], zoom: int, grid_pixels: int) -> dict[str, float]:
+    x, y = _point_to_world_pixel(point, zoom)
+    grid = max(1, int(grid_pixels))
+    return _world_pixel_to_point(round(x / grid) * grid, round(y / grid) * grid, zoom)
+
+
+def _project_point(
+    point: dict[str, float],
+    center: dict[str, float],
+    zoom: float,
+    size: int,
+) -> tuple[int, int]:
+    point_x, point_y = _point_to_world_pixel(point, zoom)
+    center_x, center_y = _point_to_world_pixel(center, zoom)
+    return (round(size / 2 + point_x - center_x), round(size / 2 + point_y - center_y))
+
+
+def _point_to_world_pixel(point: dict[str, float], zoom: float) -> tuple[float, float]:
+    lng = float(point["lng"])
+    lat = max(-85.05112878, min(85.05112878, float(point["lat"])))
+    scale = 256.0 * (2.0 ** float(zoom))
+    x = (lng + 180.0) / 360.0 * scale
+    sin_lat = math.sin(math.radians(lat))
+    y = (0.5 - math.log((1.0 + sin_lat) / (1.0 - sin_lat)) / (4.0 * math.pi)) * scale
+    return x, y
+
+
+def _world_pixel_to_point(x: float, y: float, zoom: float) -> dict[str, float]:
+    scale = 256.0 * (2.0 ** float(zoom))
+    lng = x / scale * 360.0 - 180.0
+    lat = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * y / scale))))
+    return {"lat": lat, "lng": lng}
+
+
+def _draw_marker(
+    image: Image.Image,
+    position: tuple[int, int],
+    fill: tuple[int, ...],
+    outline: tuple[int, ...],
+    radius: int = DEFAULT_MARKER_RADIUS,
+    outline_width: int = DEFAULT_MARKER_OUTLINE_WIDTH,
+) -> None:
+    draw = ImageDraw.Draw(image)
+    x, y = position
+    outline_color = _rgba(outline)
+    fill_color = _rgba(fill)
+    outer_radius = radius + max(0, outline_width)
+    draw.ellipse(
+        (x - outer_radius, y - outer_radius, x + outer_radius, y + outer_radius),
+        fill=outline_color,
+    )
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=fill_color)
 
 
 def _wgs84_to_gcj02(lat: float, lon: float) -> tuple[float, float]:
@@ -392,9 +537,15 @@ def _transform_lon(x: float, y: float) -> float:
     return ret
 
 
-def _rgb(value: tuple[int, int, int]) -> str:
-    r, g, b = value
+def _rgb(value: tuple[int, ...]) -> str:
+    r, g, b = value[:3]
     return f"#{_clamp_color(r):02x}{_clamp_color(g):02x}{_clamp_color(b):02x}"
+
+
+def _rgba(value: tuple[int, ...]) -> tuple[int, int, int, int]:
+    r, g, b = value[:3]
+    a = value[3] if len(value) > 3 else 255
+    return (_clamp_color(r), _clamp_color(g), _clamp_color(b), _clamp_color(a))
 
 
 def _clamp_color(value: int) -> int:
