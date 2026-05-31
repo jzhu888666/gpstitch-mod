@@ -53,6 +53,7 @@ class UnifiedApp {
         this._lastMapWarmupKey = null;
         this._amapSettings = null;
         this._amapContextAbortController = null;
+        this._amapFallbackPreviewActive = false;
         this.amapProvider = window.AMapProvider ? new window.AMapProvider() : null;
     }
 
@@ -1043,6 +1044,10 @@ class UnifiedApp {
         if (this.state.mode !== 'quick' || !this.state.hasValidSession() || !this.previewImageEl?.complete) {
             return;
         }
+        if (this._amapFallbackPreviewActive) {
+            this._hideAmapLayer(false);
+            return;
+        }
         if (!this.amapProvider || !this.amapLayerEl) {
             return;
         }
@@ -1106,7 +1111,33 @@ class UnifiedApp {
                 title: window.i18n?.t('AMap JS API') || 'AMap JS API',
                 duration: 5000
             });
+            this._renderFallbackPreviewAfterAmapFailure().catch((fallbackError) => {
+                console.warn('AMap fallback preview failed:', fallbackError);
+            });
         }
+    }
+
+    async _renderFallbackPreviewAfterAmapFailure() {
+        if (this._amapFallbackPreviewActive || this.state.mode !== 'quick' || !this.state.hasValidSession()) {
+            return;
+        }
+
+        this._amapFallbackPreviewActive = true;
+        const config = this.state.getPreviewConfig();
+        const response = await fetch('/api/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(this._buildQuickPreviewRequest(config, 'osm'))
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Fallback preview failed');
+        }
+
+        const data = await response.json();
+        this._showPreview(data.image_base64);
+        this.showStatus(`${window.i18n.t('Preview at')} ${this.state.formatTime(data.frame_time_ms)}`);
     }
 
     _getPreviewImageMetrics() {
@@ -1143,6 +1174,7 @@ class UnifiedApp {
 
         try {
             const config = this.state.getPreviewConfig();
+            this._amapFallbackPreviewActive = false;
 
             let response;
             if (this.state.mode === 'quick') {
@@ -1150,21 +1182,7 @@ class UnifiedApp {
                 response = await fetch('/api/preview', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        session_id: config.sessionId,
-                        layout: config.layout,
-                        frame_time_ms: Math.round(config.frameTimeMs),
-                        units_speed: config.unitsSpeed,
-                        units_altitude: config.unitsAltitude,
-                        units_distance: config.unitsDistance,
-                        units_temperature: config.unitsTemperature,
-                        map_style: config.mapStyle,
-                        gps_dop_max: config.gpsDopMax,
-                        gps_speed_max: config.gpsSpeedMax,
-                        video_time_alignment: config.videoTimeAlignment || 'auto',
-                        time_offset_seconds: config.timeOffsetSeconds || 0,
-                        language: config.language
-                    }),
+                    body: JSON.stringify(this._buildQuickPreviewRequest(config)),
                     signal
                 });
             } else {
@@ -1237,6 +1255,24 @@ class UnifiedApp {
             }
             this._showPreviewEmpty();
         }
+    }
+
+    _buildQuickPreviewRequest(config, mapStyleOverride = null) {
+        return {
+            session_id: config.sessionId,
+            layout: config.layout,
+            frame_time_ms: Math.round(config.frameTimeMs),
+            units_speed: config.unitsSpeed,
+            units_altitude: config.unitsAltitude,
+            units_distance: config.unitsDistance,
+            units_temperature: config.unitsTemperature,
+            map_style: mapStyleOverride || config.mapStyle,
+            gps_dop_max: config.gpsDopMax,
+            gps_speed_max: config.gpsSpeedMax,
+            video_time_alignment: config.videoTimeAlignment || 'auto',
+            time_offset_seconds: config.timeOffsetSeconds || 0,
+            language: config.language
+        };
     }
 
     _showPreviewEmpty() {

@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from gpstitch.models.schemas import PreviewRequest, PreviewResponse
-from gpstitch.services.amap_settings import backend_map_style
+from gpstitch.services.amap_settings import backend_map_style, is_amap_style
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.renderer import image_to_base64, render_preview
 
@@ -55,6 +55,7 @@ async def generate_preview(request: PreviewRequest) -> PreviewResponse:
                 video_time_alignment=request.video_time_alignment,
                 time_offset_seconds=request.time_offset_seconds,
                 language=request.language,
+                suppress_map_components=is_amap_style(request.map_style),
             ),
         )
 

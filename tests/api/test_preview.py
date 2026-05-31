@@ -86,6 +86,32 @@ class TestPreviewGeneration:
         data = response.json()
         assert "image_base64" in data
 
+    async def test_amap_preview_suppresses_backend_map_components(self, async_client, api_test_video, monkeypatch):
+        """AMap quick preview should not ask the backend renderer to draw map widgets."""
+        upload_resp = await async_client.post("/api/local-file", json={"file_path": str(api_test_video)})
+        session_id = upload_resp.json()["session_id"]
+        captured = {}
+
+        def fake_render_preview(**kwargs):
+            captured.update(kwargs)
+            return b"png", 1920, 1080
+
+        monkeypatch.setattr("gpstitch.api.preview.render_preview", fake_render_preview)
+
+        response = await async_client.post(
+            "/api/preview",
+            json={
+                "session_id": session_id,
+                "layout": "dji-drone-1920x1080",
+                "frame_time_ms": 5000,
+                "map_style": "amap-jsapi",
+            },
+        )
+
+        assert response.status_code == 200
+        assert captured["map_style"] == "osm"
+        assert captured["suppress_map_components"] is True
+
     async def test_preview_different_frame_times(self, async_client, api_test_video):
         """Preview at different frame times should work."""
         # Create session

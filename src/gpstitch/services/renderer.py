@@ -2,7 +2,9 @@
 
 import asyncio
 import base64
+import contextlib
 import datetime
+import hashlib
 import io
 import logging
 import os
@@ -77,6 +79,16 @@ DEFAULT_OSD_SCALE_VERSION = "v7"
 DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
 DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
 DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
+MAP_COMPONENT_TYPES = frozenset(
+    {
+        "moving_map",
+        "journey_map",
+        "moving_journey_map",
+        "circuit_map",
+        "cairo_circuit_map",
+    }
+)
+_NO_BACKEND_MAP_LAYOUT_CACHE_DIR = "amap-jsapi-no-backend-map-v1"
 
 
 # Shared font list for consistency between preview and CLI render
@@ -307,6 +319,50 @@ def _resolve_layout_path(layout: str, language: str | None = None) -> Path:
     if layout in DEFAULT_LAYOUT_NAMES:
         return _localized_default_layout_path(layout, language)
     return Path(layout)
+
+
+def _layout_without_map_components_path(layout: str, language: str | None = None) -> Path:
+    """Create or return a cached layout variant with map components removed."""
+    source = _resolve_layout_path(layout, language=language)
+    lang = normalize_language(language)
+    source_key = hashlib.sha1(str(source.resolve()).encode("utf-8")).hexdigest()[:12]
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(layout).stem or source.stem)
+    target_dir = settings.layout_cache_dir / _NO_BACKEND_MAP_LAYOUT_CACHE_DIR / lang
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{safe_name}-{source_key}.xml"
+
+    if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
+        return target
+
+    tree = ET.parse(source)
+    root = tree.getroot()
+    removed = _remove_components_by_type(root, MAP_COMPONENT_TYPES)
+    tree.write(target, encoding="utf-8", xml_declaration=False)
+    logger.debug("Created no-backend-map layout %s from %s; removed %d map components", target, source, removed)
+    return target
+
+
+def _xml_without_map_components(xml_content: str) -> str:
+    """Remove map components from layout XML content."""
+    root = ET.fromstring(xml_content)
+    _remove_components_by_type(root, MAP_COMPONENT_TYPES)
+    return ET.tostring(root, encoding="unicode")
+
+
+def _remove_components_by_type(parent: ET.Element, component_types: frozenset[str]) -> int:
+    removed = 0
+    for child in list(parent):
+        removed += _remove_components_by_type(child, component_types)
+        if child.tag == "component" and child.attrib.get("type") in component_types:
+            parent.remove(child)
+            removed += 1
+        elif child.tag in {"translate", "composite", "frame"} and len(child) == 0 and not (child.text or "").strip():
+            parent.remove(child)
+    return removed
+
+
+def _backend_map_renderer_disabled(_map) -> None:
+    raise RuntimeError("Backend map rendering is disabled for AMap JSAPI preview")
 
 
 def _localized_default_layout_path(layout: str, language: str | None = None) -> Path:
@@ -1379,6 +1435,7 @@ def render_preview(
     video_time_alignment: str | None = None,
     time_offset_seconds: int = 0,
     language: str = DEFAULT_LANGUAGE,
+    suppress_map_components: bool = False,
 ) -> tuple[bytes, int, int]:
     """Render a preview image for the given file and settings.
 
@@ -1411,7 +1468,12 @@ def render_preview(
     )
 
     # Load the layout XML
-    layout_xml = load_xml_layout(_resolve_layout_path(layout, language=language))
+    layout_path = (
+        _layout_without_map_components_path(layout, language=language)
+        if suppress_map_components
+        else _resolve_layout_path(layout, language=language)
+    )
+    layout_xml = load_xml_layout(layout_path)
 
     # Get layout dimensions
     layout_info = None
@@ -1458,7 +1520,13 @@ def render_preview(
     style = map_style or "osm"
     styler = MapStyler()
 
-    with MapRenderer(cache_dir, styler).open(style) as renderer:
+    renderer_context = (
+        contextlib.nullcontext(_backend_map_renderer_disabled)
+        if suppress_map_components
+        else MapRenderer(cache_dir, styler).open(style)
+    )
+
+    with renderer_context as renderer:
         # Load font with fallback
         font = _load_font_with_fallback()
 
@@ -1560,6 +1628,7 @@ async def render_preview_from_layout(
     video_time_alignment: str | None = None,
     time_offset_seconds: int = 0,
     language: str = DEFAULT_LANGUAGE,
+    suppress_map_components: bool = False,
 ) -> dict:
     """
     Render preview from an editor layout.
@@ -1581,6 +1650,8 @@ async def render_preview_from_layout(
 
     # Convert layout to XML
     xml_content = xml_converter.layout_to_xml(layout)
+    if suppress_map_components:
+        xml_content = _xml_without_map_components(xml_content)
 
     # Check if layout contains cairo widgets
     if "cairo" in xml_content.lower() and not is_pycairo_available():
@@ -1612,6 +1683,7 @@ async def render_preview_from_layout(
                 video_time_alignment,
                 time_offset_seconds,
                 language,
+                suppress_map_components,
             ),
         )
         return {
@@ -1649,6 +1721,7 @@ def _render_layout_with_data(
     video_time_alignment: str | None = None,
     time_offset_seconds: int = 0,
     language: str = DEFAULT_LANGUAGE,
+    suppress_map_components: bool = False,
 ) -> tuple[bytes, int, int]:
     """Render layout XML with actual data from file."""
     from gopro_overlay.ffmpeg import FFMPEG
@@ -1702,7 +1775,13 @@ def _render_layout_with_data(
     styler = MapStyler()
     style = map_style or "osm"
 
-    with MapRenderer(cache_dir, styler).open(style) as renderer:
+    renderer_context = (
+        contextlib.nullcontext(_backend_map_renderer_disabled)
+        if suppress_map_components
+        else MapRenderer(cache_dir, styler).open(style)
+    )
+
+    with renderer_context as renderer:
         font = _load_font_with_fallback()
         privacy = NoPrivacyZone()
 
