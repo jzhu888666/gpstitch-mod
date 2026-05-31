@@ -66,13 +66,14 @@ DEFAULT_LAYOUT_TRANSLATIONS = {
         "Lon: ": "经度: ",
         "SLOPE(%)": "坡度(%)",
         "ALT({:~C})": "海拔({:~C})",
+        "ALT CHANGE": "海拔变化",
     },
     "en": {},
 }
 
 DEFAULT_OSD_BASE_WIDTH = 1920
 DEFAULT_OSD_SCALE_ATTR = "gpstitch_osd_scale"
-DEFAULT_OSD_SCALE_VERSION = "v5"
+DEFAULT_OSD_SCALE_VERSION = "v6"
 DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
 DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
 DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
@@ -333,6 +334,8 @@ def _localized_default_layout_path(layout: str, language: str | None = None) -> 
     root = tree.getroot()
     _remove_named_children(root, {"temperature", "cadence", "heartbeat"})
     _configure_default_osd_datetime(root)
+    _ensure_default_osd_chart_label(root)
+    _localize_default_osd_metric_units(root, lang)
     _scale_default_osd_layout(root, layout, scale)
     translations = DEFAULT_LAYOUT_TRANSLATIONS.get(lang, {})
     for elem in root.iter("component"):
@@ -377,6 +380,36 @@ def _configure_default_osd_datetime(root: ET.Element) -> None:
         component.attrib.pop("truncate", None)
 
 
+def _ensure_default_osd_chart_label(root: ET.Element) -> None:
+    chart = _find_root_layout_child(root, "gradient_chart")
+    if chart is None or _find_root_layout_child(root, "gradient_chart_label") is not None:
+        return
+
+    label = ET.Element(
+        "component",
+        {
+            "type": "text",
+            "name": "gradient_chart_label",
+            "x": chart.attrib.get("x", "400"),
+            "y": "956",
+            "size": "16",
+            "align": "left",
+        },
+    )
+    label.text = "ALT CHANGE"
+    label.tail = chart.tail
+    root.insert(list(root).index(chart), label)
+
+
+def _localize_default_osd_metric_units(root: ET.Element, lang: str) -> None:
+    if lang != "zh-CN":
+        return
+
+    speed_unit = root.find("./composite[@name='big_mph']/component[@type='metric_unit'][@metric='speed']")
+    if speed_unit is not None and (speed_unit.text or "").strip() == "{:~c}":
+        speed_unit.text = "公里/小时"
+
+
 def _default_osd_scale_for_layout(layout: str) -> float:
     width, _height = _parse_resolution(layout)
     return max(width / DEFAULT_OSD_BASE_WIDTH, 1.0)
@@ -398,13 +431,11 @@ def _default_layout_cache_is_current(target: Path, source: Path, scale: float) -
 
 def _scale_default_osd_layout(root: ET.Element, layout: str, scale: float) -> None:
     root.set(DEFAULT_OSD_SCALE_ATTR, _format_default_osd_scale(scale))
-    if scale <= 1.0:
-        return
-
-    for child in root:
-        if child.attrib.get("name") not in DEFAULT_OSD_UNSCALED_ROOT_NAMES:
-            _scale_numeric_attr(child, "x", scale)
-        _scale_default_osd_subtree(child, scale, is_root=True)
+    if scale > 1.0:
+        for child in root:
+            if child.attrib.get("name") not in DEFAULT_OSD_UNSCALED_ROOT_NAMES:
+                _scale_numeric_attr(child, "x", scale)
+            _scale_default_osd_subtree(child, scale, is_root=True)
     _position_default_osd_root_widgets(root, layout, scale)
 
 
@@ -467,6 +498,10 @@ def _position_default_osd_root_widgets(root: ET.Element, layout: str, scale: flo
         if elem is not None:
             _set_int_attr(elem, "x", x * scale)
             _set_int_attr(elem, "y", bottom_row_y)
+    chart_label = _find_root_layout_child(root, "gradient_chart_label")
+    if chart_label is not None:
+        _set_int_attr(chart_label, "x", 400 * scale)
+        _set_int_attr(chart_label, "y", bottom_row_y - 24 * scale)
 
     moving_map = _find_root_layout_child(root, "moving_map")
     journey_map = _find_root_layout_child(root, "journey_map")

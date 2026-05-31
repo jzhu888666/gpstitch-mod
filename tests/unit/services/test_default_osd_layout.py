@@ -2,7 +2,7 @@
 
 import xml.etree.ElementTree as ET
 
-from gpstitch.services.renderer import _localized_default_layout_path, _resolve_layout_path
+from gpstitch.services.renderer import _FONTS_TO_TRY, _localized_default_layout_path, _resolve_layout_path
 
 
 def test_default_osd_layout_removes_bottom_right_widgets(temp_dir, monkeypatch):
@@ -20,6 +20,8 @@ def test_default_osd_layout_removes_bottom_right_widgets(temp_dir, monkeypatch):
     assert 'format="%Y/%m/%d {weekday_zh}"' not in xml
     assert 'timezone="source"' in xml
     assert "GPS 信息" in xml
+    assert "公里/小时" in xml
+    assert "海拔变化" in xml
 
 
 def test_default_4k_osd_layout_scales_text_and_local_spacing(temp_dir, monkeypatch):
@@ -34,9 +36,10 @@ def test_default_4k_osd_layout_scales_text_and_local_spacing(temp_dir, monkeypat
     gradient_group = root.find("./composite[@name='gradient']")
     moving_map = root.find("./component[@name='moving_map']")
     journey_map = root.find("./component[@name='journey_map']")
+    chart_label = root.find("./component[@name='gradient_chart_label']")
     datetime_components = root.findall("./composite[@name='date_and_time']/component[@type='datetime']")
 
-    assert root.attrib["gpstitch_osd_scale"] == "v5:2"
+    assert root.attrib["gpstitch_osd_scale"] == "v6:2"
     assert len(datetime_components) == 3
     assert datetime_components[0].attrib["format"] == "%Y/%m/%d"
     assert datetime_components[0].attrib["timezone"] == "source"
@@ -56,6 +59,10 @@ def test_default_4k_osd_layout_scales_text_and_local_spacing(temp_dir, monkeypat
     assert speed_group.attrib["y"] == "1600"
     assert altitude_group.attrib["y"] == "1960"
     assert gradient_group.attrib["y"] == "1960"
+    assert chart_label.text == "ALT CHANGE"
+    assert chart_label.attrib["x"] == "800"
+    assert chart_label.attrib["y"] == "1912"
+    assert chart_label.attrib["size"] == "32"
     assert root.find(".//component[@type='metric_unit'][@metric='speed']").attrib["size"] == "32"
     assert root.find(".//component[@type='text']").attrib["size"] == "32"
     assert root.find(".//component[@type='metric'][@metric='lat']").attrib["x"] == "236"
@@ -75,3 +82,7 @@ def test_custom_layout_path_is_not_rewritten(temp_dir):
 
     assert resolved == custom
     assert 'name="temperature"' in custom.read_text(encoding="utf-8")
+
+
+def test_default_osd_font_candidates_prioritize_chinese_fonts():
+    assert _FONTS_TO_TRY.index("C:/Windows/Fonts/msyh.ttc") < _FONTS_TO_TRY.index("Roboto-Medium.ttf")
