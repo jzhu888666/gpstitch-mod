@@ -1,11 +1,20 @@
 """Configuration settings for GPStitch."""
 
+import contextlib
+import os
 import tempfile
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_settings_dir() -> Path:
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / "GPStitch" / "settings"
+    return Path.home() / ".gpstitch" / "settings"
 
 
 class Settings(BaseSettings):
@@ -43,7 +52,8 @@ class Settings(BaseSettings):
     cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache"
     map_cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "maps"
     layout_cache_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "layouts"
-    settings_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "settings"
+    legacy_settings_dir: Path = PROJECT_ROOT / ".gpstitch-cache" / "settings"
+    settings_dir: Path = _default_settings_dir()
     map_cache_warmup_max_tiles: int = 2048
     # Keep render startup responsive. Frontend/background warmup can prefetch
     # many tiles, while render itself should not block on network tile fetches.
@@ -62,7 +72,9 @@ class Settings(BaseSettings):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.map_cache_dir.mkdir(parents=True, exist_ok=True)
         self.layout_cache_dir.mkdir(parents=True, exist_ok=True)
-        self.settings_dir.mkdir(parents=True, exist_ok=True)
+        self.legacy_settings_dir.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            self.settings_dir.mkdir(parents=True, exist_ok=True)
         self.templates_dir.mkdir(parents=True, exist_ok=True)
 
 

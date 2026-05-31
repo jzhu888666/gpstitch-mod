@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
@@ -38,8 +39,13 @@ def amap_fallback_message() -> str:
 class AMapSettingsService:
     """Persist AMap credentials locally and expose redacted metadata."""
 
-    def __init__(self, settings_path: Path | None = None):
+    def __init__(self, settings_path: Path | None = None, legacy_settings_path: Path | None = None):
         self.settings_path = settings_path or settings.settings_dir / "amap.json"
+        self.legacy_settings_path = (
+            legacy_settings_path
+            if legacy_settings_path is not None
+            else (None if settings_path is not None else settings.legacy_settings_dir / "amap.json")
+        )
         self._lock = RLock()
 
     def get_settings(self) -> AMapSettingsResponse:
@@ -74,7 +80,9 @@ class AMapSettingsService:
                 "last_error": None,
                 "validation_generation": int(existing.get("validation_generation", 0)) + 1,
             }
-            self._write(data)
+            written_path = self._write(data)
+            if written_path != self.legacy_settings_path:
+                self._remove_legacy()
             return self._to_response(data)
 
     def record_validation(self, success: bool, error: str | None = None) -> AMapSettingsResponse:
@@ -87,13 +95,16 @@ class AMapSettingsService:
             data["last_error"] = None if success else self._sanitize_error(error, data)
             if not success:
                 data["validation_generation"] = int(data.get("validation_generation", 0)) + 1
-            self._write(data)
+            written_path = self._write(data)
+            if written_path != self.legacy_settings_path:
+                self._remove_legacy()
             return self._to_response(data)
 
     def clear(self) -> AMapSettingsResponse:
         with self._lock:
             if self.settings_path.exists():
                 self.settings_path.unlink()
+            self._remove_legacy()
             return AMapSettingsResponse()
 
     def cache_fingerprint(self) -> str:
@@ -107,15 +118,59 @@ class AMapSettingsService:
 
     def _read(self) -> dict[str, Any]:
         if not self.settings_path.exists():
+            migrated = self._read_legacy()
+            if migrated:
+                written_path = self._write(migrated)
+                if written_path != self.legacy_settings_path:
+                    self._remove_legacy()
+                return migrated
             return {}
         try:
             return json.loads(self.settings_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
-    def _write(self, data: dict[str, Any]) -> None:
-        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    def _write(self, data: dict[str, Any]) -> Path:
+        try:
+            return self._write_to_path(self.settings_path, data)
+        except OSError:
+            if self.legacy_settings_path is None or self.legacy_settings_path == self.settings_path:
+                raise
+            self.settings_path = self.legacy_settings_path
+            return self._write_to_path(self.settings_path, data)
+
+    def _write_to_path(self, path: Path, data: dict[str, Any]) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(payload)
+            temp_path = Path(temp_file.name)
+        temp_path.replace(path)
+        return path
+
+    def _read_legacy(self) -> dict[str, Any]:
+        if self.legacy_settings_path is None or not self.legacy_settings_path.exists():
+            return {}
+        try:
+            data = json.loads(self.legacy_settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _remove_legacy(self) -> None:
+        if self.legacy_settings_path is None:
+            return
+        try:
+            self.legacy_settings_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _to_response(self, data: dict[str, Any]) -> AMapSettingsResponse:
         configured = bool(data.get("key") and data.get("security_js_code"))
