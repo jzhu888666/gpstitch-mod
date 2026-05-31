@@ -14,8 +14,10 @@ def test_default_osd_layout_removes_bottom_right_widgets(temp_dir, monkeypatch):
     assert "name=\"temperature\"" not in xml
     assert "name=\"cadence\"" not in xml
     assert "name=\"heartbeat\"" not in xml
-    assert 'format="%Y/%m/%d {weekday_zh}"' in xml
+    assert 'format="%Y/%m/%d"' in xml
+    assert 'format="{weekday_zh}"' in xml
     assert 'format="%H:%M:%S"' in xml
+    assert 'format="%Y/%m/%d {weekday_zh}"' not in xml
     assert 'timezone="source"' in xml
     assert "GPS 信息" in xml
 
@@ -34,14 +36,20 @@ def test_default_4k_osd_layout_scales_text_and_local_spacing(temp_dir, monkeypat
     journey_map = root.find("./component[@name='journey_map']")
     datetime_components = root.findall("./composite[@name='date_and_time']/component[@type='datetime']")
 
-    assert root.attrib["gpstitch_osd_scale"] == "v4:2"
-    assert datetime_components[0].attrib["format"] == "%Y/%m/%d {weekday_zh}"
+    assert root.attrib["gpstitch_osd_scale"] == "v5:2"
+    assert len(datetime_components) == 3
+    assert datetime_components[0].attrib["format"] == "%Y/%m/%d"
     assert datetime_components[0].attrib["timezone"] == "source"
     assert datetime_components[0].attrib["size"] == "64"
-    assert datetime_components[1].attrib["format"] == "%H:%M:%S"
+    assert datetime_components[0].attrib["y"] == "0"
+    assert datetime_components[1].attrib["format"] == "{weekday_zh}"
     assert datetime_components[1].attrib["timezone"] == "source"
     assert datetime_components[1].attrib["size"] == "64"
     assert datetime_components[1].attrib["y"] == "80"
+    assert datetime_components[2].attrib["format"] == "%H:%M:%S"
+    assert datetime_components[2].attrib["timezone"] == "source"
+    assert datetime_components[2].attrib["size"] == "64"
+    assert datetime_components[2].attrib["y"] == "160"
     assert speed_metric.attrib["size"] == "320"
     assert speed_metric.attrib["x"] == "0"
     assert speed_metric.attrib["y"] == "0"

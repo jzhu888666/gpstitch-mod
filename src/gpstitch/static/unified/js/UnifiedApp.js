@@ -759,11 +759,8 @@ class UnifiedApp {
                 }
                 return;
             }
-            if (data.capped && data.message && window.toast) {
-                window.toast.info(data.message, {
-                    title: window.i18n?.t('Map Cache') || 'Map Cache',
-                    duration: 3000
-                });
+            if (data.capped && data.message) {
+                console.info('Map cache warmup capped:', data.message);
             }
         } catch (error) {
             console.warn('Map cache warmup failed:', error);

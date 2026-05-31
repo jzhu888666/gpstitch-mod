@@ -72,7 +72,7 @@ DEFAULT_LAYOUT_TRANSLATIONS = {
 
 DEFAULT_OSD_BASE_WIDTH = 1920
 DEFAULT_OSD_SCALE_ATTR = "gpstitch_osd_scale"
-DEFAULT_OSD_SCALE_VERSION = "v4"
+DEFAULT_OSD_SCALE_VERSION = "v5"
 DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
 DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
 DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
@@ -80,6 +80,16 @@ DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
 
 # Shared font list for consistency between preview and CLI render
 _FONTS_TO_TRY = [
+    # CJK-capable fonts first so localized weekday labels render correctly.
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/msyhbd.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
     # Standard Roboto font (may be installed)
     "Roboto-Medium.ttf",
     # macOS system fonts
@@ -346,18 +356,25 @@ def _configure_default_osd_datetime(root: ET.Element) -> None:
     if len(datetime_components) < 2:
         return
 
-    date_component, time_component = datetime_components[:2]
-    date_component.set("format", "%Y/%m/%d {weekday_zh}")
-    date_component.set("size", "32")
-    date_component.set("y", "0")
-    date_component.set("timezone", "source")
-    date_component.attrib.pop("truncate", None)
+    date_component, weekday_component = datetime_components[:2]
+    if len(datetime_components) >= 3:
+        time_component = datetime_components[2]
+    else:
+        time_component = ET.Element("component", dict(weekday_component.attrib))
+        date_time.insert(list(date_time).index(weekday_component) + 1, time_component)
+    if time_component.tail is None:
+        time_component.tail = weekday_component.tail
 
-    time_component.set("format", "%H:%M:%S")
-    time_component.set("size", "32")
-    time_component.set("y", "40")
-    time_component.set("timezone", "source")
-    time_component.attrib.pop("truncate", None)
+    for component, format_string, y in (
+        (date_component, "%Y/%m/%d", "0"),
+        (weekday_component, "{weekday_zh}", "40"),
+        (time_component, "%H:%M:%S", "80"),
+    ):
+        component.set("format", format_string)
+        component.set("size", "32")
+        component.set("y", y)
+        component.set("timezone", "source")
+        component.attrib.pop("truncate", None)
 
 
 def _default_osd_scale_for_layout(layout: str) -> float:
