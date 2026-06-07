@@ -35,6 +35,19 @@ def test_datetime_formatter_supports_weekday_only_format():
     assert formatter() == "星期日"
 
 
+def test_datetime_formatter_defaults_to_source_timezone():
+    import gopro_overlay.layout_xml as layout_xml_module
+    from gpstitch.patches.layout_datetime_patches import patch_layout_datetime_formatting
+
+    patch_layout_datetime_formatting()
+    element = ET.fromstring('<component type="datetime" format="%H:%M:%S" />')
+    entry = Entry(datetime.datetime(2026, 5, 10, 8, 19, 1, tzinfo=datetime.UTC))
+
+    formatter = layout_xml_module.date_formatter_from_element(element, lambda: entry)
+
+    assert formatter() == "08:19:01"
+
+
 def test_datetime_widget_accepts_timezone_attribute():
     import gopro_overlay.layout_xml as layout_xml_module
     from gpstitch.patches.layout_datetime_patches import patch_layout_datetime_formatting

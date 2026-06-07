@@ -15,7 +15,7 @@ _WEEKDAY_ZH = ["一", "二", "三", "四", "五", "六", "日"]
 
 
 def patch_layout_datetime_formatting() -> None:
-    """Allow datetime widgets to opt out of implicit local timezone conversion."""
+    """Keep datetime widgets on the source timeline unless a timezone is requested."""
     import gopro_overlay.layout_xml as layout_xml_module
     from gopro_overlay.layout_xml_attribute import allow_attributes
 
@@ -29,7 +29,7 @@ def patch_layout_datetime_formatting() -> None:
     def patched_date_formatter_from_element(element: ET.Element, entry: Callable[[], Entry]):
         format_string = layout_xml_module.attrib(element, "format")
         truncate = layout_xml_module.iattrib(element, "truncate", d=0)
-        timezone_mode = layout_xml_module.attrib(element, "timezone", d="local")
+        timezone_mode = layout_xml_module.attrib(element, "timezone", d="source")
         return _date_formatter(entry, format_string, truncate, timezone_mode)
 
     @allow_attributes(
@@ -59,7 +59,7 @@ def _date_formatter(
     entry: Callable[[], Entry],
     format_string: str,
     truncate: int = 0,
-    timezone_mode: str = "local",
+    timezone_mode: str = "source",
 ) -> Callable[[], str]:
     def formatter() -> str:
         dt = _datetime_for_timezone(entry().dt, timezone_mode)
