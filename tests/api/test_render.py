@@ -116,6 +116,55 @@ class TestRenderJobs:
         assert data["shutdown_after_all_tasks"] is False
         assert isinstance(data["shutdown_supported"], bool)
 
+    async def test_list_render_jobs_returns_full_queue_by_default(
+        self,
+        async_client,
+        isolated_render_jobs,
+        temp_dir,
+    ):
+        """Task Manager should not silently hide jobs after the first 100."""
+        created_ids = []
+        for index in range(125):
+            job = await job_manager.create_job(
+                RenderJobConfig(
+                    session_id=f"task-list-session-{index}",
+                    layout="default-1920x1080",
+                    output_file=str(temp_dir / f"queued_{index}_overlay.mp4"),
+                )
+            )
+            created_ids.append(job.id)
+
+        response = await async_client.get("/api/render/jobs")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 125
+        assert len(data["jobs"]) == 125
+        assert {job["job_id"] for job in data["jobs"]} == set(created_ids)
+
+    async def test_list_render_jobs_limit_keeps_total_count(
+        self,
+        async_client,
+        isolated_render_jobs,
+        temp_dir,
+    ):
+        """Explicit list limits should page the payload without changing total."""
+        for index in range(125):
+            await job_manager.create_job(
+                RenderJobConfig(
+                    session_id=f"task-list-limited-session-{index}",
+                    layout="default-1920x1080",
+                    output_file=str(temp_dir / f"limited_{index}_overlay.mp4"),
+                )
+            )
+
+        response = await async_client.get("/api/render/jobs?limit=100")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 125
+        assert len(data["jobs"]) == 100
+
     async def test_cancel_pending_render_job(self, async_client, isolated_render_jobs, temp_dir):
         """POST /api/render/cancel/{job_id} can cancel a queued task."""
         job = await job_manager.create_job(

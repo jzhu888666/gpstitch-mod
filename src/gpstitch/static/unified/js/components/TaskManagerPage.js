@@ -204,7 +204,7 @@ class TaskManagerPage {
 
         this._jobsRequestPending = true;
         try {
-            const response = await fetch('/api/render/jobs?limit=100');
+            const response = await fetch('/api/render/jobs');
             if (!response.ok) {
                 throw new Error(this._t('Failed to load tasks'));
             }

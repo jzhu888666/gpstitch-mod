@@ -105,7 +105,7 @@ class JobManager:
         """Get job by ID."""
         return self._jobs.get(job_id)
 
-    async def list_jobs(self, limit: int = 50) -> list[Job]:
+    async def list_jobs(self, limit: int | None = None) -> list[Job]:
         """List recent jobs, newest first."""
         jobs = [
             job
@@ -115,7 +115,13 @@ class JobManager:
                 reverse=True,
             )
         ]
+        if limit is None:
+            return jobs
         return jobs[:limit]
+
+    async def count_jobs(self) -> int:
+        """Count all jobs in the task queue."""
+        return len(self._jobs)
 
     def _running_jobs_unlocked(self) -> list[Job]:
         """Return running jobs in stable FIFO order."""

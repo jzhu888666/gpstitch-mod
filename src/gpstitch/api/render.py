@@ -144,7 +144,7 @@ class RenderJobClearResponse(BaseModel):
 class RenderJobBulkActionRequest(BaseModel):
     """Request to apply an action to selected render jobs."""
 
-    job_ids: list[str] = Field(min_length=1, max_length=500)
+    job_ids: list[str] = Field(min_length=1, max_length=5000)
 
 
 class RenderJobBulkActionResult(BaseModel):
@@ -541,15 +541,16 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
 
 
 @router.get("/render/jobs", response_model=RenderJobListResponse)
-async def list_render_jobs(limit: int = Query(default=100, ge=1, le=500)) -> RenderJobListResponse:
+async def list_render_jobs(limit: int | None = Query(default=None, ge=1, le=5000)) -> RenderJobListResponse:
     """List recent render jobs for the task manager."""
 
     jobs = await job_manager.list_jobs(limit=limit)
+    total_jobs = await job_manager.count_jobs()
     current = await job_manager.get_current_job()
     running_jobs = await job_manager.get_running_jobs()
     return RenderJobListResponse(
         jobs=[_job_list_item(job) for job in jobs],
-        total=len(jobs),
+        total=total_jobs,
         active_job_id=current.id if current else None,
         active_job_ids=[job.id for job in running_jobs],
         render_concurrency=render_service.concurrency,
