@@ -231,6 +231,59 @@ class TestFfmpegOutputDiagnostics:
         ]
 
 
+class TestRenderConcurrencySettings:
+    """Tests for render concurrency persistence."""
+
+    def test_render_service_loads_persisted_concurrency(self, tmp_path, monkeypatch):
+        from gpstitch.services import render_service as render_service_module
+        from gpstitch.services.runtime_settings import RuntimeSettingsService
+
+        runtime_settings = RuntimeSettingsService(tmp_path / "runtime.json")
+        runtime_settings.set_render_concurrency(3)
+
+        monkeypatch.setattr(render_service_module, "runtime_settings_service", runtime_settings)
+
+        service = render_service_module.RenderService()
+
+        assert service.concurrency == 3
+
+    async def test_set_concurrency_persists_value(self, tmp_path, monkeypatch):
+        from gpstitch.services import render_service as render_service_module
+        from gpstitch.services.runtime_settings import RuntimeSettingsService
+
+        runtime_settings = RuntimeSettingsService(tmp_path / "runtime.json")
+        monkeypatch.setattr(render_service_module, "runtime_settings_service", runtime_settings)
+
+        service = render_service_module.RenderService()
+        service.kick_queue = AsyncMock()
+
+        assert await service.set_concurrency(2) == 2
+        assert runtime_settings.get_render_concurrency(default=1) == 2
+        service.kick_queue.assert_awaited_once()
+
+    async def test_start_next_pending_job_fills_available_concurrency(self, monkeypatch):
+        from gpstitch.services import render_service as render_service_module
+
+        pending_jobs = [
+            SimpleNamespace(id="job-1", config=SimpleNamespace()),
+            SimpleNamespace(id="job-2", config=SimpleNamespace()),
+            SimpleNamespace(id="job-3", config=SimpleNamespace()),
+        ]
+        fake_job_manager = SimpleNamespace(get_next_pending_jobs=AsyncMock(return_value=pending_jobs))
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+
+        service = render_service_module.RenderService()
+        service._concurrency = 3
+        service.start_render = AsyncMock()
+
+        await service._start_next_pending_job()
+        await asyncio.sleep(0)
+
+        fake_job_manager.get_next_pending_jobs.assert_awaited_once_with(3)
+        assert service._active_job_ids == {"job-1", "job-2", "job-3"}
+        assert service.start_render.await_count == 3
+
+
 class TestMapCacheWarmupBeforeRender:
     """Render startup should not block on large map tile warmups."""
 
@@ -294,6 +347,175 @@ class TestMapCacheWarmupBeforeRender:
         fake_job_manager.append_job_log.assert_awaited_once()
 
 
+class TestShutdownAfterAllTasks:
+    """Tests for task-manager shutdown scheduling."""
+
+    class RuntimeSettings:
+        def __init__(self, enabled: bool):
+            self.enabled = enabled
+
+        def get_render_concurrency(self, default: int = 1) -> int:
+            return default
+
+        def get_shutdown_after_all_tasks(self, default: bool = False) -> bool:
+            return self.enabled
+
+    async def test_queue_drain_schedules_shutdown(self, monkeypatch):
+        from gpstitch.services import render_service as render_service_module
+
+        fake_job_manager = SimpleNamespace(
+            has_unfinished_jobs=AsyncMock(return_value=False),
+            get_latest_job=AsyncMock(return_value=SimpleNamespace(id="job-1")),
+            append_job_log=AsyncMock(),
+        )
+        fake_power = SimpleNamespace(
+            schedule_shutdown_once=AsyncMock(return_value=SimpleNamespace(success=True, message="scheduled")),
+        )
+        monkeypatch.setattr(render_service_module, "runtime_settings_service", self.RuntimeSettings(True))
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+        monkeypatch.setattr(render_service_module, "power_service", fake_power)
+
+        service = render_service_module.RenderService()
+        service._shutdown_after_all_tasks_armed = True
+        await service._maybe_shutdown_after_all_tasks()
+
+        fake_power.schedule_shutdown_once.assert_awaited_once()
+        assert fake_power.schedule_shutdown_once.await_args.args[0] == "all-render-tasks"
+        fake_job_manager.append_job_log.assert_awaited_once_with("job-1", "scheduled")
+
+    async def test_unfinished_jobs_arm_without_scheduling(self, monkeypatch):
+        from gpstitch.services import render_service as render_service_module
+
+        fake_job_manager = SimpleNamespace(has_unfinished_jobs=AsyncMock(return_value=True))
+        fake_power = SimpleNamespace(schedule_shutdown_once=AsyncMock())
+        monkeypatch.setattr(render_service_module, "runtime_settings_service", self.RuntimeSettings(True))
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+        monkeypatch.setattr(render_service_module, "power_service", fake_power)
+
+        service = render_service_module.RenderService()
+        await service._maybe_shutdown_after_all_tasks()
+
+        assert service._shutdown_after_all_tasks_armed is True
+        fake_power.schedule_shutdown_once.assert_not_awaited()
+
+    async def test_disabled_setting_clears_armed_state(self, monkeypatch):
+        from gpstitch.services import render_service as render_service_module
+
+        fake_job_manager = SimpleNamespace(has_unfinished_jobs=AsyncMock(return_value=False))
+        fake_power = SimpleNamespace(schedule_shutdown_once=AsyncMock())
+        monkeypatch.setattr(render_service_module, "runtime_settings_service", self.RuntimeSettings(False))
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+        monkeypatch.setattr(render_service_module, "power_service", fake_power)
+
+        service = render_service_module.RenderService()
+        service._shutdown_after_all_tasks_armed = True
+        await service._maybe_shutdown_after_all_tasks()
+
+        assert service._shutdown_after_all_tasks_armed is False
+        fake_power.schedule_shutdown_once.assert_not_awaited()
+
+
+class TestRenderRetry:
+    """Tests for retrying failed render attempts before final failure."""
+
+    async def test_retry_or_fail_requeues_when_budget_remains(self, monkeypatch):
+        from gpstitch.services import render_service as render_service_module
+
+        fake_job_manager = SimpleNamespace(
+            reset_job_for_retry=AsyncMock(return_value=True),
+            append_job_log=AsyncMock(),
+            update_job_status=AsyncMock(),
+        )
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+
+        retried = await render_service_module.RenderService()._retry_or_fail_job("job-1", "temporary failure")
+
+        assert retried is True
+        fake_job_manager.reset_job_for_retry.assert_awaited_once_with("job-1", "temporary failure")
+        fake_job_manager.update_job_status.assert_not_awaited()
+        fake_job_manager.append_job_log.assert_not_awaited()
+
+    async def test_retry_or_fail_marks_failed_after_budget_exhausted(self, monkeypatch):
+        from gpstitch.models.job import JobStatus
+        from gpstitch.services import render_service as render_service_module
+
+        fake_job_manager = SimpleNamespace(
+            reset_job_for_retry=AsyncMock(return_value=False),
+            append_job_log=AsyncMock(),
+            update_job_status=AsyncMock(),
+        )
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+
+        retried = await render_service_module.RenderService()._retry_or_fail_job("job-1", "permanent failure")
+
+        assert retried is False
+        fake_job_manager.reset_job_for_retry.assert_awaited_once_with("job-1", "permanent failure")
+        assert [call.args for call in fake_job_manager.append_job_log.await_args_list] == [
+            ("job-1", "\n=== Failed ==="),
+            ("job-1", "permanent failure"),
+        ]
+        fake_job_manager.update_job_status.assert_awaited_once_with(
+            "job-1",
+            JobStatus.FAILED,
+            "permanent failure",
+        )
+
+
+class TestLocalSessionRestore:
+    """Tests for restoring local sessions needed by retried jobs."""
+
+    async def test_restore_local_session_files_from_persisted_command_log(self, monkeypatch, temp_dir):
+        from gpstitch.models.job import RenderJobConfig
+        from gpstitch.models.schemas import FileRole
+        from gpstitch.services import render_service as render_service_module
+
+        video = temp_dir / "DJI_20260509161038_0080_D.MP4"
+        output = temp_dir / "DJI_20260509161038_0080_D_overlay.mp4"
+        gpx = temp_dir / "05090802.GPX"
+        video.write_bytes(b"video")
+        gpx.write_text("<gpx />", encoding="utf-8")
+        config = RenderJobConfig(
+            session_id="local:old-session",
+            layout="default-3840x2160",
+            output_file=str(output),
+        )
+        command_log = f"python wrapper.py '{video}' '{output}' --use-gpx-only --gpx '{gpx}'"
+        fake_job = SimpleNamespace(session_files=[], log_lines=[command_log])
+
+        fake_job_manager = SimpleNamespace(
+            get_job=AsyncMock(return_value=fake_job),
+            set_job_session_files=AsyncMock(),
+            append_job_log=AsyncMock(),
+        )
+
+        class FakeFileManager:
+            def __init__(self):
+                self.sessions = {}
+
+            def is_local_session(self, session_id):
+                return session_id.startswith("local:")
+
+            def get_files(self, session_id):
+                return self.sessions.get(session_id, [])
+
+            def restore_local_session(self, session_id, files):
+                self.sessions[session_id] = list(files)
+
+        fake_file_manager = FakeFileManager()
+        monkeypatch.setattr(render_service_module, "job_manager", fake_job_manager)
+        monkeypatch.setattr("gpstitch.services.file_manager.file_manager", fake_file_manager)
+
+        restored = await render_service_module.RenderService()._restore_local_session_files_for_job("job-1", config)
+
+        assert restored is True
+        restored_files = fake_file_manager.get_files("local:old-session")
+        assert [file.role for file in restored_files] == [FileRole.PRIMARY, FileRole.SECONDARY]
+        assert restored_files[0].file_path == str(video)
+        assert restored_files[1].file_path == str(gpx)
+        fake_job_manager.set_job_session_files.assert_awaited_once()
+        fake_job_manager.append_job_log.assert_awaited_once_with("job-1", "Restored local session files for retry")
+
+
 class TestResolveMtimeForAlignment:
     """Tests for _resolve_mtime_for_alignment method."""
 
@@ -343,6 +565,63 @@ class TestResolveMtimeForAlignment:
             ts = render_service._resolve_mtime_for_alignment(config, "/tmp/video.mov")
 
         assert ts == fake_ctime.timestamp()
+
+    def test_auto_mode_without_creation_time_uses_dji_filename(self, render_service, config, monkeypatch):
+        """DJI files without MP4 creation_time should still use filename start when it matches GPX."""
+        config.video_time_alignment = "auto"
+        dji_start = datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+
+        mock_secondary = MagicMock()
+        mock_secondary.file_type = "gpx"
+        mock_secondary.file_path = "/tmp/05050756.GPX"
+
+        from gpstitch.services import file_manager as fm_module
+
+        mock_fm = MagicMock()
+        mock_fm.get_secondary_file.return_value = mock_secondary
+        mock_fm.get_primary_file.return_value = None
+        monkeypatch.setattr(fm_module, "file_manager", mock_fm)
+
+        with (
+            patch("gpstitch.services.renderer._extract_creation_time", return_value=None),
+            patch("gpstitch.services.renderer._resolve_dji_filename_start_time", return_value=dji_start),
+        ):
+            ts = render_service._resolve_mtime_for_alignment(
+                config,
+                "/tmp/DJI_20260505091523_0004_D.MP4",
+            )
+
+        assert ts == dji_start.timestamp()
+
+    def test_auto_mode_prefers_dji_filename_over_creation_time(self, render_service, config, monkeypatch):
+        """DJI filenames should win before stale MP4 creation_time in all-day GPX renders."""
+        config.video_time_alignment = "auto"
+        creation_time = datetime.datetime(2026, 5, 5, 9, 26, 47, tzinfo=datetime.UTC)
+        dji_start = datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+
+        mock_secondary = MagicMock()
+        mock_secondary.file_type = "gpx"
+        mock_secondary.file_path = "/tmp/05050756.GPX"
+
+        from gpstitch.services import file_manager as fm_module
+
+        mock_fm = MagicMock()
+        mock_fm.get_secondary_file.return_value = mock_secondary
+        mock_fm.get_primary_file.return_value = None
+        monkeypatch.setattr(fm_module, "file_manager", mock_fm)
+
+        with (
+            patch("gpstitch.services.renderer._resolve_dji_filename_start_time", return_value=dji_start),
+            patch("gpstitch.services.renderer._extract_creation_time", return_value=creation_time),
+            patch("gpstitch.services.renderer._validate_creation_time") as mock_validate,
+        ):
+            ts = render_service._resolve_mtime_for_alignment(
+                config,
+                "/tmp/DJI_20260505091523_0004_D.MP4",
+            )
+
+        assert ts == dji_start.timestamp()
+        mock_validate.assert_not_called()
 
     def test_manual_mode_with_offset(self, render_service, config):
         """Manual mode should add offset to creation_time timestamp."""
@@ -469,6 +748,7 @@ class TestAmapRenderCommand:
 
         assert captured["map_style"] is None
         assert captured["amap_render"] is True
+        assert captured["amap_map_style"] == "amap-jsapi"
         assert not captured.get("suppress_map_components", False)
         log_lines = [call.args[1] for call in fake_job_manager.append_job_log.await_args_list]
         assert not any(line.startswith("WARNING:") for line in log_lines)

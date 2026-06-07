@@ -625,6 +625,9 @@ class TestRendererMapStyles:
         # Should have OSM style
         style_names = [s["name"] for s in styles]
         assert "osm" in style_names or any("open" in name.lower() for name in style_names)
+        assert "amap-jsapi" in style_names
+        assert "amap-jsapi-satellite" in style_names
+        assert "amap-jsapi-mixed" in style_names
 
 
 @pytest.mark.integration

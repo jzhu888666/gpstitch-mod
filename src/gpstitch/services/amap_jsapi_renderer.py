@@ -18,11 +18,13 @@ from PIL import Image, ImageDraw
 
 from gpstitch.config import settings
 from gpstitch.models.schemas import AMapRuntimeConfigResponse
-from gpstitch.services.amap_settings import AMAP_JSAPI_VERSION
+from gpstitch.services.amap_settings import AMAP_JSAPI_VERSION, amap_layer_type_for_widget, normalize_amap_style
 
 logger = logging.getLogger(__name__)
 
 MOVING_MAP_GRID_PIXELS = 16
+JOURNEY_ROTATION_BACKING_SCALE = 2.0
+ROTATION_SAFE_PADDING_PIXELS = 16
 DEFAULT_MARKER_RADIUS = 7
 DEFAULT_MARKER_OUTLINE_WIDTH = 2
 
@@ -46,6 +48,7 @@ class AMapJSAPISnapshotRenderer:
         cache_dir: Path | None = None,
         timeout_ms: int = 20000,
         max_memory_snapshots: int = 128,
+        map_style: str | None = None,
     ) -> None:
         if not runtime_config.configured or not runtime_config.validated:
             raise AMapRenderError("AMap credentials must be configured and validated before video rendering.")
@@ -53,6 +56,7 @@ class AMapJSAPISnapshotRenderer:
             raise AMapRenderError("AMap runtime key and security JS code are required for video rendering.")
 
         self.runtime_config = runtime_config
+        self.map_style = normalize_amap_style(map_style)
         self.timeout_ms = timeout_ms
         self.max_memory_snapshots = max(0, int(max_memory_snapshots))
         self.cache_dir = cache_dir or settings.map_cache_dir / "amap" / "render-snapshots"
@@ -90,15 +94,13 @@ class AMapJSAPISnapshotRenderer:
         size: int,
         zoom: int,
         rotation_degrees: float | None = None,
-        line_fill: tuple[int, int, int] = (31, 143, 255),
-        line_width: int = 5,
         marker_fill: tuple[int, int, int] = (0, 0, 255),
         marker_outline: tuple[int, int, int] = (0, 0, 0),
     ) -> Image.Image:
         current = _to_amap_point(lat, lon)
-        route = _sample_route(route or [], 600)
         output_size = int(size)
         render_size = _moving_backing_size(output_size)
+        map_rotation = _amap_map_rotation(rotation_degrees)
         center = _quantize_point(current, int(zoom), MOVING_MAP_GRID_PIXELS)
         options = {
             "kind": "moving-base",
@@ -107,23 +109,16 @@ class AMapJSAPISnapshotRenderer:
             "center": center,
             "route": [],
             "drawMarker": False,
+            "layerType": amap_layer_type_for_widget(self.map_style, "moving_map"),
         }
+        if map_rotation is not None:
+            options["rotation"] = map_rotation
         snapshot = self._render_cached_snapshot(options)
         frame = snapshot.image.copy()
-        if route:
-            _draw_route_line(
-                frame,
-                [
-                    _project_point(_to_amap_point(route_lat, route_lon), center, int(zoom), render_size)
-                    for route_lat, route_lon in route
-                ],
-                line_fill,
-                line_width,
-            )
         marker_xy = _project_point(current, center, int(zoom), render_size)
+        if map_rotation is not None:
+            marker_xy = _rotate_pixel(marker_xy, _image_center(frame), map_rotation)
         frame = _center_image_on_point(frame, marker_xy)
-        if rotation_degrees is not None:
-            frame = frame.rotate(float(rotation_degrees) % 360, resample=Image.BILINEAR)
         frame = _center_crop(frame, output_size)
         _draw_marker(frame, _image_center(frame), marker_fill, marker_outline)
         return frame
@@ -139,10 +134,12 @@ class AMapJSAPISnapshotRenderer:
         line_width: int = 5,
         marker_fill: tuple[int, int, int] = (0, 0, 255),
         marker_outline: tuple[int, int, int] = (0, 0, 0),
+        widget_type: str = "journey_map",
     ) -> Image.Image:
         route = _sample_route(route, 600)
         output_size = int(size)
-        render_size = _moving_backing_size(output_size) if rotation_degrees is not None else output_size
+        map_rotation = _amap_map_rotation(rotation_degrees)
+        render_size = _journey_rotation_backing_size(output_size) if map_rotation is not None else output_size
         current_point = _to_amap_point(current[0], current[1])
         options = {
             "kind": "journey-base",
@@ -151,9 +148,13 @@ class AMapJSAPISnapshotRenderer:
             "route": [_to_amap_point(lat, lon) for lat, lon in route],
             "lineFill": _rgb(line_fill),
             "lineWidth": int(line_width),
-            "fitPadding": [round(output_size / 2)] * 4 if rotation_degrees is not None else [0, 0, 0, 0],
+            "fitPadding": [_rotation_safe_padding(output_size)] * 4 if map_rotation is not None else [0, 0, 0, 0],
+            "drawRoute": False,
             "drawMarker": False,
+            "layerType": amap_layer_type_for_widget(self.map_style, widget_type),
         }
+        if map_rotation is not None:
+            options["rotation"] = map_rotation
         snapshot = self._render_cached_snapshot(options)
         center = snapshot.metadata.get("center")
         zoom = snapshot.metadata.get("zoom")
@@ -162,13 +163,8 @@ class AMapJSAPISnapshotRenderer:
             marker_xy = _project_point(current_point, center, float(zoom), render_size)
         else:
             marker_xy = _image_center(frame)
-        if rotation_degrees is not None:
-            frame = frame.rotate(
-                float(rotation_degrees) % 360,
-                resample=Image.BILINEAR,
-                center=marker_xy,
-                fillcolor=(0, 0, 0, 0),
-            )
+        if map_rotation is not None:
+            marker_xy = _rotate_pixel(marker_xy, _image_center(frame), map_rotation)
             frame = _crop_around_point(frame, marker_xy, output_size)
             _draw_marker(frame, _image_center(frame), marker_fill, marker_outline)
             return frame
@@ -284,7 +280,7 @@ class AMapJSAPISnapshotRenderer:
     def _cache_key(self, options: dict[str, Any]) -> str:
         payload = {
             "version": AMAP_JSAPI_VERSION,
-            "renderer": "gcj02-route-heading-v3",
+            "renderer": "gcj02-no-route-heading-v5",
             "fingerprint": self.runtime_config.key_fingerprint,
             "options": options,
         }
@@ -362,6 +358,27 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
       return {{ lng: location.lng, lat: location.lat }};
     }}
 
+    function normalizeRotation(value) {{
+      const degrees = Number(value);
+      if (!Number.isFinite(degrees)) return null;
+      return ((Math.round(degrees) % 360) + 360) % 360;
+    }}
+
+    function applyMapRotation(map, rotation) {{
+      if (rotation === null || typeof map.setRotation !== 'function') return;
+      map.setRotation(rotation);
+    }}
+
+    function mapLayersForType(AMap, layerType) {{
+      if (layerType === 'satellite-roadnet') {{
+        return [
+          new AMap.TileLayer.Satellite({{ zIndex: 3 }}),
+          new AMap.TileLayer.RoadNet({{ zIndex: 4 }})
+        ];
+      }}
+      return null;
+    }}
+
     function waitMapComplete(map) {{
       return new Promise(resolve => {{
         let done = false;
@@ -397,26 +414,38 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
         const current = options.current ? toLngLat(options.current) : null;
         const route = (options.route || []).map(toLngLat);
         const center = explicitCenter || current || route[0] || [116.397428, 39.90923];
+        const mapRotation = normalizeRotation(options.rotation);
+        const mapLayers = mapLayersForType(AMap, options.layerType);
 
-        const map = new AMap.Map(mapEl, {{
-          viewMode: '2D',
+        const mapOptions = {{
+          viewMode: '3D',
+          pitch: 0,
           resizeEnable: false,
           animateEnable: false,
           zoom: options.zoom || 16,
-          center
-        }});
+          center,
+          rotateEnable: false,
+          pitchEnable: false,
+          rotation: mapRotation === null ? 0 : mapRotation
+        }};
+        if (mapLayers) {{
+          mapOptions.layers = mapLayers;
+        }}
+
+        const map = new AMap.Map(mapEl, mapOptions);
         activeMap = map;
 
         const overlays = [];
         if (route.length > 1) {{
+          const drawRoute = options.drawRoute !== false;
           const polyline = new AMap.Polyline({{
             path: route,
             showDir: false,
             strokeColor: options.lineFill || '#1f8fff',
-            strokeOpacity: 0.9,
-            strokeWeight: Math.max(1, options.lineWidth || 5),
+            strokeOpacity: drawRoute ? 0.9 : 0,
+            strokeWeight: drawRoute ? Math.max(1, options.lineWidth || 5) : 1,
             lineJoin: 'round',
-            zIndex: 20
+            zIndex: drawRoute ? 20 : 1
           }});
           map.add(polyline);
           overlays.push(polyline);
@@ -443,13 +472,15 @@ def _renderer_html(runtime_config: AMapRuntimeConfigResponse) -> str:
           map.setZoom(options.zoom || 16);
         }}
 
+        applyMapRotation(map, mapRotation);
         await waitMapComplete(map);
         await sleep(650);
         return {{
           ok: true,
           metadata: {{
             center: fromLngLat(map.getCenter()),
-            zoom: map.getZoom()
+            zoom: map.getZoom(),
+            rotation: mapRotation
           }}
         }};
       }} catch (error) {{
@@ -477,6 +508,14 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _moving_backing_size(size: int) -> int:
     return int(math.sqrt((int(size) ** 2) * 2))
+
+
+def _journey_rotation_backing_size(size: int) -> int:
+    return int(math.ceil(int(size) * JOURNEY_ROTATION_BACKING_SCALE))
+
+
+def _rotation_safe_padding(size: int) -> int:
+    return int(math.ceil((int(size) * math.sqrt(2)) / 2 + ROTATION_SAFE_PADDING_PIXELS))
 
 
 def _center_crop(image: Image.Image, size: int) -> Image.Image:
@@ -533,6 +572,34 @@ def _center_image_on_point(image: Image.Image, point: tuple[int, int]) -> Image.
 
 def _image_center(image: Image.Image) -> tuple[int, int]:
     return (round(image.width / 2), round(image.height / 2))
+
+
+def _amap_map_rotation(heading_degrees: float | None) -> int | None:
+    if heading_degrees is None:
+        return None
+    try:
+        heading = float(heading_degrees)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(heading):
+        return None
+    return (360 - int(round(heading))) % 360
+
+
+def _rotate_pixel(
+    point: tuple[int, int],
+    origin: tuple[int, int],
+    clockwise_degrees: float,
+) -> tuple[int, int]:
+    angle = math.radians(float(clockwise_degrees) % 360)
+    dx = float(point[0]) - float(origin[0])
+    dy = float(point[1]) - float(origin[1])
+    cos_angle = math.cos(angle)
+    sin_angle = math.sin(angle)
+    return (
+        round(float(origin[0]) + dx * cos_angle - dy * sin_angle),
+        round(float(origin[1]) + dx * sin_angle + dy * cos_angle),
+    )
 
 
 def _sample_route(route: list[tuple[float, float]], limit: int) -> list[tuple[float, float]]:
@@ -603,18 +670,6 @@ def _draw_marker(
         fill=outline_color,
     )
     draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=fill_color)
-
-
-def _draw_route_line(
-    image: Image.Image,
-    points: list[tuple[int, int]],
-    fill: tuple[int, ...],
-    width: int,
-) -> None:
-    if len(points) < 2:
-        return
-    draw = ImageDraw.Draw(image)
-    draw.line(points, fill=_rgba((*fill[:3], 230)), width=max(1, int(width)), joint="curve")
 
 
 def _wgs84_to_gcj02(lat: float, lon: float) -> tuple[float, float]:

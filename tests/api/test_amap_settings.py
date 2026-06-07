@@ -35,9 +35,23 @@ async def test_map_styles_include_amap_metadata(monkeypatch, temp_dir):
     response = await options.get_map_styles(language="en")
 
     amap = next(style for style in response.styles if style.name == "amap-jsapi")
+    satellite = next(style for style in response.styles if style.name == "amap-jsapi-satellite")
+    mixed = next(style for style in response.styles if style.name == "amap-jsapi-mixed")
     assert amap.provider == "amap"
     assert amap.requires_api_key is True
     assert amap.requires_security_js_code is True
     assert amap.configured is True
     assert amap.validated is True
     assert amap.key_fingerprint is not None
+    assert satellite.provider == "amap"
+    assert satellite.requires_api_key is True
+    assert satellite.requires_security_js_code is True
+    assert satellite.configured is True
+    assert satellite.validated is True
+    assert satellite.key_fingerprint == amap.key_fingerprint
+    assert mixed.provider == "amap"
+    assert mixed.requires_api_key is True
+    assert mixed.requires_security_js_code is True
+    assert mixed.configured is True
+    assert mixed.validated is True
+    assert mixed.key_fingerprint == amap.key_fingerprint

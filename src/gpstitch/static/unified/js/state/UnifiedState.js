@@ -38,7 +38,7 @@ class UnifiedState {
             ffmpegProfile: '',
             // GPS filter settings (less strict than CLI defaults)
             gpsDopMax: 20,      // CLI default: 10
-            gpsSpeedMax: 200    // CLI default: 60 kph
+            gpsSpeedMax: 200     // CLI default: 60 kph
         };
 
         // Time sync analysis result (from /api/time-sync/analyze)
@@ -81,6 +81,7 @@ class UnifiedState {
                 if (oldValues.includes(this.quickConfig.videoTimeAlignment)) {
                     this.quickConfig.videoTimeAlignment = 'auto';
                 }
+                delete this.quickConfig.shutdownAfterRender;
             } catch (e) {
                 console.warn('Failed to parse saved quick config:', e);
             }

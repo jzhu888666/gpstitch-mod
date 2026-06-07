@@ -73,6 +73,9 @@ def localize_map_style_name(style_name: str, display_name: str, language: str | 
     if normalize_language(language) == "en":
         return display_name
     known = {
+        "amap-jsapi": "高德 JS API",
+        "amap-jsapi-satellite": "高德卫星 + 路网",
+        "amap-jsapi-mixed": "高德混合（上方普通 + 下方卫星）",
         "osm": "OpenStreetMap",
         "humanitarian": "OSM 人道主义",
         "cycle": "自行车地图",

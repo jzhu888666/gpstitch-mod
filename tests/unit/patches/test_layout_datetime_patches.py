@@ -3,6 +3,7 @@
 import datetime
 import xml.etree.ElementTree as ET
 
+import pytest
 from gopro_overlay.entry import Entry
 
 
@@ -51,3 +52,19 @@ def test_datetime_widget_accepts_timezone_attribute():
     widget = layout_xml_module.Widgets.create_datetime(FakeWidgets(), element, lambda: entry)
 
     assert widget.value() == "10:56:45"
+
+
+def test_datetime_formatter_local_timezone_renders_utc_plus_8_wall_clock():
+    import gopro_overlay.layout_xml as layout_xml_module
+    from gpstitch.patches.layout_datetime_patches import patch_layout_datetime_formatting
+
+    if datetime.datetime.now().astimezone().utcoffset() != datetime.timedelta(hours=8):
+        pytest.skip("OSD local-time regression is only deterministic on UTC+8 systems")
+
+    patch_layout_datetime_formatting()
+    element = ET.fromstring('<component type="datetime" format="%H:%M:%S" timezone="local" />')
+    entry = Entry(datetime.datetime(2026, 5, 9, 8, 12, 59, tzinfo=datetime.UTC))
+
+    formatter = layout_xml_module.date_formatter_from_element(element, lambda: entry)
+
+    assert formatter() == "16:12:59"

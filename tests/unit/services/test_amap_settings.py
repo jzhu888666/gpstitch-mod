@@ -2,7 +2,7 @@
 
 import pytest
 
-from gpstitch.services.amap_settings import AMapSettingsService, backend_map_style, is_amap_style
+from gpstitch.services.amap_settings import AMapSettingsService, amap_layer_type_for_widget, backend_map_style, is_amap_style
 
 
 def test_amap_settings_redacts_saved_credentials(temp_dir):
@@ -113,8 +113,18 @@ def test_amap_validation_sanitizes_secret_values(temp_dir):
 
 def test_amap_backend_style_falls_back_to_osm():
     assert is_amap_style("amap-jsapi") is True
+    assert is_amap_style("amap-jsapi-satellite") is True
+    assert is_amap_style("amap-jsapi-mixed") is True
     assert backend_map_style("amap-jsapi") == "osm"
+    assert backend_map_style("amap-jsapi-satellite") == "osm"
+    assert backend_map_style("amap-jsapi-mixed") == "osm"
     assert backend_map_style("osm") == "osm"
+
+
+def test_amap_mixed_style_uses_widget_specific_layers():
+    assert amap_layer_type_for_widget("amap-jsapi-mixed", "moving_map") == "standard"
+    assert amap_layer_type_for_widget("amap-jsapi-mixed", "journey_map") == "satellite-roadnet"
+    assert amap_layer_type_for_widget("amap-jsapi-mixed", "moving_journey_map") == "satellite-roadnet"
 
 
 def test_amap_validation_requires_configured_credentials(temp_dir):

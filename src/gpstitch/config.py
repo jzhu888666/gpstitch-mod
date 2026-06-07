@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # Keep render startup responsive. Frontend/background warmup can prefetch
     # many tiles, while render itself should not block on network tile fetches.
     map_cache_render_warmup_max_tiles: int = 0
+    # Maximum simultaneous render jobs. Can be overridden with
+    # GPSTITCH_RENDER_CONCURRENCY, and the UI can adjust it at runtime.
+    render_concurrency: int = 1
 
     # Template storage directory
     templates_dir: Path = Path.home() / ".gpstitch" / "templates"

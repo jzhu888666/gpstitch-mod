@@ -47,7 +47,7 @@
 
     <!-- GPS info (top-right, above map) -->
     <composite x="4430" y="0" name="gps_info">
-        <frame name="gps-lock" x="565" y="60" width="80" height="80" bg="0,0,0,128" cr="12" opacity="0.4">
+        <frame name="gps-lock" x="560" y="0" width="80" height="80" bg="0,0,0,128" cr="12" opacity="0.4">
             <component type="gps-lock-icon" size="80"/>
         </frame>
 

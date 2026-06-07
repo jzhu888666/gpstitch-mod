@@ -324,6 +324,7 @@ class AMapRenderContextRequest(BaseModel):
     layout: str = "default-1920x1080"
     frame_time_ms: int = Field(default=0, ge=0)
     language: LanguageCode = DEFAULT_LANGUAGE
+    map_style: str = "amap-jsapi"
 
 
 class AMapRenderContextResponse(BaseModel):
@@ -333,6 +334,7 @@ class AMapRenderContextResponse(BaseModel):
     provider: str = "amap"
     canvas_width: int = 1920
     canvas_height: int = 1080
+    map_style: str = "amap-jsapi"
     route_points: list[AMapRoutePoint] = Field(default_factory=list)
     map_widgets: list[AMapMapWidget] = Field(default_factory=list)
     cache_key: str | None = None
@@ -380,6 +382,22 @@ class LocalDirectoryDialogResponse(BaseModel):
     message: str | None = None
 
 
+class LocalDirectoriesDialogRequest(BaseModel):
+    """Request to open a local directory picker that can select multiple folders."""
+
+    title: str | None = None
+    initial_dir: str | None = None
+    language: LanguageCode = DEFAULT_LANGUAGE
+
+
+class LocalDirectoriesDialogResponse(BaseModel):
+    """Response from a local multi-directory picker."""
+
+    selected: bool
+    directory_paths: list[str] = Field(default_factory=list)
+    message: str | None = None
+
+
 class BatchDirectoryListRequest(BaseModel):
     """Request to list supported batch-render files from a local directory."""
 
@@ -402,6 +420,26 @@ class BatchDirectoryListResponse(BaseModel):
     directory_path: str
     files: list[BatchDirectoryFile]
     total_videos: int
+    message: str | None = None
+
+
+class BatchDirectoriesListRequest(BaseModel):
+    """Request to list supported batch-render files from multiple local directories."""
+
+    directory_paths: list[str] = Field(min_length=1)
+    gps_directory_paths: list[str] = Field(default_factory=list)
+    recursive: bool = False
+    language: LanguageCode = DEFAULT_LANGUAGE
+
+
+class BatchDirectoriesListResponse(BaseModel):
+    """Supported files discovered across multiple local directories."""
+
+    directory_paths: list[str]
+    gps_directory_paths: list[str] = Field(default_factory=list)
+    files: list[BatchDirectoryFile]
+    total_videos: int
+    total_matched_gps: int
     message: str | None = None
 
 

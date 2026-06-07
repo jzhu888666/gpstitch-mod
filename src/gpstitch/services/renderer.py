@@ -38,6 +38,8 @@ from gpstitch.constants import (
 from gpstitch.services.localization import normalize_language
 from gpstitch.scripts.gopro_dashboard_wrapper import (
     TS_DJI_META_SOURCE_ARG,
+    TS_GPX_TIME_SHIFT_ARG,
+    TS_AMAP_MAP_STYLE_ARG,
     TS_AMAP_RENDER_ARG,
     TS_ODO_OFFSET_ARG,
     TS_SRT_SOURCE_ARG,
@@ -76,7 +78,7 @@ DEFAULT_LAYOUT_TRANSLATIONS = {
 
 DEFAULT_OSD_BASE_WIDTH = 1920
 DEFAULT_OSD_SCALE_ATTR = "gpstitch_osd_scale"
-DEFAULT_OSD_SCALE_VERSION = "v7"
+DEFAULT_OSD_SCALE_VERSION = "v9"
 DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
 DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
 DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
@@ -450,7 +452,7 @@ def _configure_default_osd_datetime(root: ET.Element) -> None:
         component.set("format", format_string)
         component.set("size", "32")
         component.set("y", y)
-        component.set("timezone", "source")
+        component.set("timezone", "local")
         component.attrib.pop("truncate", None)
 
 
@@ -597,9 +599,23 @@ def _position_default_osd_root_widgets(root: ET.Element, layout: str, scale: flo
             _set_int_attr(elem, "x", map_x)
     if gps_info is not None:
         _set_int_attr(gps_info, "y", 0)
+        _position_default_osd_gps_lock(gps_info, map_size)
     _set_int_attr(moving_map, "y", map_y)
     if journey_map is not None:
         _set_int_attr(journey_map, "y", map_y + map_size + map_margin)
+
+
+def _position_default_osd_gps_lock(gps_info: ET.Element, map_size: int) -> None:
+    gps_lock = gps_info.find("./frame[@name='gps-lock']")
+    if gps_lock is None:
+        return
+    try:
+        icon_width = int(float(gps_lock.attrib.get("width", "0")))
+    except ValueError:
+        icon_width = 0
+    icon_width = icon_width if icon_width > 0 else max(1, round(map_size / 8))
+    _set_int_attr(gps_lock, "x", max(0, map_size - icon_width))
+    _set_int_attr(gps_lock, "y", 0)
 
 
 def _find_root_layout_child(root: ET.Element, name: str) -> ET.Element | None:
@@ -641,7 +657,12 @@ def get_available_units() -> dict:
 def get_available_map_styles() -> list[dict]:
     """Get available map styles from gopro_overlay."""
     from gopro_overlay.geo import available_map_styles
-    from gpstitch.services.amap_settings import AMAP_MAP_STYLE, AMAP_PROVIDER
+    from gpstitch.services.amap_settings import (
+        AMAP_MAP_STYLE,
+        AMAP_MIXED_MAP_STYLE,
+        AMAP_PROVIDER,
+        AMAP_SATELLITE_MAP_STYLE,
+    )
 
     # Map styles that require API keys (by prefix)
     API_KEY_PREFIXES = ["tf-", "geo-"]
@@ -668,6 +689,24 @@ def get_available_map_styles() -> list[dict]:
         {
             "name": AMAP_MAP_STYLE,
             "display_name": "AMap JS API",
+            "requires_api_key": True,
+            "provider": AMAP_PROVIDER,
+            "requires_security_js_code": True,
+        }
+    )
+    result.append(
+        {
+            "name": AMAP_SATELLITE_MAP_STYLE,
+            "display_name": "AMap Satellite + RoadNet",
+            "requires_api_key": True,
+            "provider": AMAP_PROVIDER,
+            "requires_security_js_code": True,
+        }
+    )
+    result.append(
+        {
+            "name": AMAP_MIXED_MAP_STYLE,
+            "display_name": "AMap Mixed: Standard Moving + Satellite Route",
             "requires_api_key": True,
             "provider": AMAP_PROVIDER,
             "requires_security_js_code": True,
@@ -791,9 +830,8 @@ def _extract_creation_time(file_path: Path) -> datetime.datetime | None:
 
     Returns a timezone-aware datetime or None if not found.
     """
-    import json
-
     from gopro_overlay.ffmpeg import FFMPEG
+    from gpstitch.patches.ffmpeg_gopro_patches import loads_ffprobe_json
 
     try:
         ffmpeg = FFMPEG()
@@ -810,7 +848,7 @@ def _extract_creation_time(file_path: Path) -> datetime.datetime | None:
             )
             .stdout
         )
-        data = json.loads(output)
+        data = loads_ffprobe_json(output)
         tags = data.get("format", {}).get("tags", {})
         creation_time_str = tags.get("creation_time")
         if creation_time_str:
@@ -822,6 +860,24 @@ def _extract_creation_time(file_path: Path) -> datetime.datetime | None:
         logger.debug("Could not extract creation_time from %s: %s", file_path, e)
 
     return None
+
+
+def _extract_dji_filename_start_time(file_path: Path) -> datetime.datetime | None:
+    """Extract DJI recording start wall-clock time from filenames.
+
+    DJI camera filenames commonly encode the recording start time, for example
+    ``DJI_20260510140346_0055_D.MP4``. FFprobe ``creation_time`` can be the
+    MP4 container creation/end time, so this filename value is a better start
+    candidate when it overlaps the external GPS track.
+    """
+    match = re.match(r"^DJI[_-](\d{14})(?:[_-].*)?\.(?:mp4|mov)$", file_path.name, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        naive = datetime.datetime.strptime(match.group(1), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    return naive.replace(tzinfo=datetime.UTC)
 
 
 def _get_gps_time_range(gps_path: Path) -> tuple[float, float] | None:
@@ -891,12 +947,86 @@ def _overlap_seconds(shifted_start: float, duration: float, gps_min: float, gps_
     return max(0.0, min(shifted_start + duration, gps_max) - max(shifted_start, gps_min))
 
 
+def _shift_timeseries_datetimes(timeseries, shift_seconds: int):
+    """Return a copy of a Timeseries with every entry dt shifted."""
+    if not shift_seconds:
+        return timeseries
+
+    from gopro_overlay.entry import Entry
+    from gopro_overlay.timeseries import Timeseries
+
+    shift = datetime.timedelta(seconds=shift_seconds)
+    shifted = Timeseries()
+    shifted.add(*(Entry(entry.dt + shift, **entry.items) for entry in timeseries.items()))
+    return shifted
+
+
+def _detect_gpx_time_shift_seconds(
+    video_start: datetime.datetime | None,
+    video_duration_sec: float | None,
+    gps_path: Path | None,
+    source: str | None = None,
+) -> int:
+    """Detect whether an external GPX stores local wall-clock time as UTC.
+
+    Returns the number of seconds to add to every GPX timestamp. For a UTC+8
+    local-as-UTC GPX file this returns -28800, so a raw 16:11Z track point is
+    interpreted as the real UTC instant 08:11Z.
+    """
+    if video_start is None or gps_path is None or gps_path.suffix.lower() != ".gpx":
+        return 0
+    if not video_duration_sec or video_duration_sec <= 0:
+        return 0
+
+    gps_range = _get_gps_time_range(gps_path)
+    if gps_range is None:
+        return 0
+
+    system_tz = _get_system_tz_offset(video_start)
+    if system_tz is None:
+        return 0
+    system_tz_seconds = int(system_tz.total_seconds())
+    if system_tz_seconds == 0:
+        return 0
+
+    video_ts = video_start.timestamp()
+    gps_min, gps_max = gps_range
+    as_is_overlap = _overlap_seconds(video_ts, video_duration_sec, gps_min, gps_max)
+    shift_seconds = -system_tz_seconds
+    shifted_overlap = _overlap_seconds(
+        video_ts,
+        video_duration_sec,
+        gps_min + shift_seconds,
+        gps_max + shift_seconds,
+    )
+
+    if shifted_overlap <= 0:
+        return 0
+    if as_is_overlap <= 0 or shifted_overlap > as_is_overlap:
+        return shift_seconds
+
+    # Long GPX files can contain both the UTC instant and the same local wall
+    # clock later in the file. DJI filenames encode local wall-clock time, so
+    # prefer the wall-clock interpretation when both candidates overlap.
+    if source == "dji-filename" and shifted_overlap >= as_is_overlap:
+        logger.info(
+            "GPX local-as-UTC detected by DJI filename wall-clock tie-break: "
+            "as-is overlap %.1fs, shifted overlap %.1fs, shift %+ds",
+            as_is_overlap,
+            shifted_overlap,
+            shift_seconds,
+        )
+        return shift_seconds
+
+    return 0
+
+
 @dataclass
 class CorrectionResult:
     """Result from _validate_creation_time with correction metadata."""
 
     time: datetime.datetime
-    correction_type: str | None = None  # None, "system-tz", "exhaustive", or "mtime"
+    correction_type: str | None = None  # None, "system-tz", "exhaustive", "dji-filename", or "mtime"
     tz_correction_hours: float | None = None  # set for "system-tz" and "exhaustive"
     suggested_offset_seconds: int | None = None  # only set when correction failed
 
@@ -962,6 +1092,57 @@ def _best_guess_offset(ct_ts: float, duration: float, gps_min: float, gps_max: f
     return round(diff_sec / 3600) * 3600
 
 
+def _best_dji_filename_candidate(
+    file_path: Path,
+    video_duration_sec: float,
+    gps_min: float,
+    gps_max: float,
+    system_tz_seconds: int,
+) -> tuple[float, datetime.datetime] | None:
+    """Return the best overlapping DJI filename start candidate."""
+    dji_filename_start = _extract_dji_filename_start_time(file_path)
+    if dji_filename_start is None:
+        return None
+
+    dji_candidates = [dji_filename_start]
+    if system_tz_seconds != 0:
+        dji_candidates.append(dji_filename_start - datetime.timedelta(seconds=system_tz_seconds))
+
+    best_dji: tuple[float, datetime.datetime] | None = None
+    for candidate in dji_candidates:
+        overlap = _overlap_seconds(candidate.timestamp(), video_duration_sec, gps_min, gps_max)
+        if overlap > 0 and (best_dji is None or overlap > best_dji[0]):
+            best_dji = (overlap, candidate)
+    return best_dji
+
+
+def _resolve_dji_filename_start_time(
+    file_path: Path,
+    video_duration_sec: float,
+    gps_path: Path | None = None,
+) -> datetime.datetime | None:
+    """Resolve DJI filename start time when it overlaps the supplied GPS file."""
+    dji_filename_start = _extract_dji_filename_start_time(file_path)
+    if dji_filename_start is None:
+        return None
+    if gps_path is None or gps_path.suffix.lower() not in (".gpx", ".fit"):
+        return None
+    gps_range = _get_gps_time_range(gps_path)
+    if gps_range is None:
+        return None
+
+    duration = video_duration_sec if video_duration_sec > 0 else 1.0
+    system_tz_seconds = int(_get_system_tz_offset(dji_filename_start).total_seconds())
+    best_dji = _best_dji_filename_candidate(
+        file_path,
+        duration,
+        gps_range[0],
+        gps_range[1],
+        system_tz_seconds,
+    )
+    return best_dji[1] if best_dji is not None else None
+
+
 def _validate_creation_time(
     file_path: Path,
     creation_time: datetime.datetime,
@@ -1003,6 +1184,15 @@ def _validate_creation_time(
         return no_correction
 
     if video_duration_sec <= 0:
+        dji_start = _resolve_dji_filename_start_time(file_path, 0.0, gps_path)
+        if dji_start is not None and abs(dji_start.timestamp() - creation_time.timestamp()) > 2.0:
+            logger.info(
+                "Using DJI filename start time for %s despite unknown duration: creation_time %s -> %s",
+                file_path.name,
+                creation_time.isoformat(),
+                dji_start.isoformat(),
+            )
+            return CorrectionResult(time=dji_start, correction_type="dji-filename")
         return no_correction
 
     gps_range = _get_gps_time_range(gps_path)
@@ -1032,6 +1222,29 @@ def _validate_creation_time(
         if system_tz_seconds != 0
         else 0.0
     )
+
+    best_dji = _best_dji_filename_candidate(
+        file_path,
+        video_duration_sec,
+        gps_min,
+        gps_max,
+        system_tz_seconds,
+    )
+
+    # DJI filenames encode recording start time. Prefer that when both the
+    # filename and creation_time overlap a long GPX file; otherwise the greedy
+    # as-is check below can accept a wrong MP4 creation_time.
+    if as_is_overlap > 0 and best_dji is not None and abs(best_dji[1].timestamp() - ct_ts) > 2.0:
+        logger.info(
+            "Using DJI filename start time for %s: creation_time %s -> %s "
+            "(creation_time overlap %.1fs, filename overlap %.1fs)",
+            file_path.name,
+            creation_time.isoformat(),
+            best_dji[1].isoformat(),
+            as_is_overlap,
+            best_dji[0],
+        )
+        return CorrectionResult(time=best_dji[1], correction_type="dji-filename")
 
     if as_is_overlap > 0 and sys_overlap > 0:
         shifted_dt_for_log = datetime.datetime.fromtimestamp(system_shifted, tz=datetime.UTC)
@@ -1082,7 +1295,17 @@ def _validate_creation_time(
             tz_correction_hours=correction_hours,
         )
 
-    # Step 4: exhaustive search over all valid TZ offsets
+    # Step 4: DJI filename fallback before broad exhaustive search.
+    if best_dji is not None:
+        logger.info(
+            "Using DJI filename start time for %s: creation_time %s -> %s",
+            file_path.name,
+            creation_time.isoformat(),
+            best_dji[1].isoformat(),
+        )
+        return CorrectionResult(time=best_dji[1], correction_type="dji-filename")
+
+    # Step 5: exhaustive search over all valid TZ offsets
     candidates = _find_overlap_candidates(ct_ts, video_duration_sec, gps_min, gps_max)
     system_correction_sec = -system_tz_seconds
 
@@ -1118,7 +1341,7 @@ def _validate_creation_time(
         )
     # len > 1 but system TZ not among them, or len == 0 → fall through
 
-    # Step 5: mtime as-is (last resort, no TZ shifting)
+    # Step 6: mtime as-is (last resort, no TZ shifting)
     try:
         mtime_ts = os.stat(file_path).st_mtime
     except OSError:
@@ -1139,7 +1362,7 @@ def _validate_creation_time(
             )
             return CorrectionResult(time=mtime_dt, correction_type="mtime")
 
-    # Step 5: complete failure — populate best-guess for Manual mode
+    # Step 7: complete failure — populate best-guess for Manual mode
     suggested = _best_guess_offset(ct_ts, video_duration_sec, gps_min, gps_max)
     logger.warning(
         "Timezone auto-correction failed for %s. Suggested manual offset: %+ds",
@@ -1173,8 +1396,9 @@ def _resolve_time_alignment(
     When gpx_path is provided, cross-validates creation_time against GPS data
     to detect cameras that store local time as UTC (e.g. Insta360).
 
-    Returns (start_date, duration, source) where source is
-    "media-created", "system-tz", "exhaustive", "mtime", "file-created", "failed", or None.
+    Returns (start_date, duration, source) where source is "media-created",
+    "system-tz", "exhaustive", "dji-filename", "mtime", "file-created",
+    "failed", or None.
     """
     if not video_time_alignment or video_time_alignment == "gpx-timestamps":
         return None, None, None
@@ -1183,12 +1407,15 @@ def _resolve_time_alignment(
     duration = recording.video.duration
     duration_sec = duration.millis() / 1000.0
 
-    creation_time = _extract_creation_time(file_path)
-    if creation_time is not None:
+    dji_start = _resolve_dji_filename_start_time(file_path, duration_sec, gpx_path)
+    if dji_start is not None:
+        start_date = dji_start
+        source = "dji-filename"
+    elif (creation_time := _extract_creation_time(file_path)) is not None:
         result = _validate_creation_time(file_path, creation_time, duration_sec, gpx_path)
         start_date = result.time
         if result.correction_type is not None:
-            source = result.correction_type  # "system-tz", "exhaustive", or "mtime"
+            source = result.correction_type  # "system-tz", "exhaustive", "dji-filename", or "mtime"
         elif result.suggested_offset_seconds is not None:
             source = "failed"
         else:
@@ -1204,6 +1431,39 @@ def _resolve_time_alignment(
         start_date = start_date + datetime.timedelta(seconds=time_offset_seconds)
 
     return start_date, duration, source
+
+
+def _resolve_gpx_time_shift_for_command(
+    file_path: Path,
+    video_time_alignment: str | None,
+    time_offset_seconds: int,
+    gpx_path: Path | None,
+) -> int:
+    """Resolve the GPX timestamp shift needed by the render wrapper."""
+    if gpx_path is None or gpx_path.suffix.lower() != ".gpx":
+        return 0
+    if not video_time_alignment or video_time_alignment == "gpx-timestamps":
+        return 0
+    if not file_path.exists() or not gpx_path.exists():
+        return 0
+
+    try:
+        from gopro_overlay.ffmpeg import FFMPEG
+        from gopro_overlay.ffmpeg_gopro import FFMPEGGoPro
+
+        ffmpeg_gopro = FFMPEGGoPro(FFMPEG())
+        start_date, duration, source = _resolve_time_alignment(
+            file_path,
+            video_time_alignment,
+            ffmpeg_gopro,
+            time_offset_seconds,
+            gpx_path=gpx_path,
+        )
+        duration_sec = duration.millis() / 1000.0 if duration is not None else 0.0
+        return _detect_gpx_time_shift_seconds(start_date, duration_sec, gpx_path, source)
+    except Exception as e:
+        logger.warning("Failed to resolve GPX time shift for %s: %s", file_path, e)
+        return 0
 
 
 def _align_timezone(start_date, timeseries):
@@ -1579,6 +1839,10 @@ def render_preview(
                         time_offset_seconds,
                         gpx_path=gpx_path,
                     )
+                    duration_sec = duration.millis() / 1000.0 if duration is not None else 0.0
+                    gpx_time_shift = _detect_gpx_time_shift_seconds(start_date, duration_sec, gpx_path, _source)
+                    if gpx_time_shift:
+                        timeseries = _shift_timeseries_datetimes(timeseries, gpx_time_shift)
                     start_date = _align_timezone(start_date, timeseries)
                     framemeta = timeseries_to_framemeta(timeseries, units, start_date=start_date, duration=duration)
                 else:
@@ -1828,6 +2092,10 @@ def _render_layout_with_data(
                         time_offset_seconds,
                         gpx_path=gpx_path,
                     )
+                    duration_sec = duration.millis() / 1000.0 if duration is not None else 0.0
+                    gpx_time_shift = _detect_gpx_time_shift_seconds(start_date, duration_sec, gpx_path, _source)
+                    if gpx_time_shift:
+                        timeseries = _shift_timeseries_datetimes(timeseries, gpx_time_shift)
                     start_date = _align_timezone(start_date, timeseries)
                     framemeta = timeseries_to_framemeta(timeseries, units, start_date=start_date, duration=duration)
                 else:
@@ -1971,6 +2239,7 @@ def generate_cli_command(
     map_style: str | None = None,
     gpx_merge_mode: str = "OVERWRITE",
     video_time_alignment: str | None = None,
+    time_offset_seconds: int = 0,
     ffmpeg_profile: str | None = None,
     gps_dop_max: float = DEFAULT_GPS_DOP_MAX,
     gps_speed_max: float = DEFAULT_GPS_SPEED_MAX,
@@ -1978,6 +2247,7 @@ def generate_cli_command(
     language: str = DEFAULT_LANGUAGE,
     suppress_map_components: bool = False,
     amap_render: bool = False,
+    amap_map_style: str | None = None,
 ) -> tuple[str, list[str]]:
     """Generate the CLI command for full video processing.
 
@@ -2070,6 +2340,14 @@ def generate_cli_command(
 
     # Resolve secondary file path (use converted GPX if SRT was converted)
     secondary_path = secondary_gpx_path or (secondary.file_path if secondary else None)
+    gpx_time_shift_seconds = 0
+    if secondary and primary_type == "video" and secondary.file_type == "gpx" and secondary_path:
+        gpx_time_shift_seconds = _resolve_gpx_time_shift_for_command(
+            Path(primary_path),
+            video_time_alignment,
+            time_offset_seconds,
+            Path(secondary_path),
+        )
 
     # Map new alignment modes to CLI flag values.
     # "auto" and "manual" use file-modified — render_service sets mtime to the
@@ -2242,12 +2520,19 @@ def generate_cli_command(
     if getattr(primary.video_metadata, "has_dji_meta", False) is True and not secondary:
         cmd_parts.append(f"{TS_DJI_META_SOURCE_ARG} {shlex.quote(primary_path)}")
 
+    # Shift plain GPX timestamps at load time when the source stores local
+    # wall-clock values with a UTC marker.
+    if gpx_time_shift_seconds:
+        cmd_parts.append(f"{TS_GPX_TIME_SHIFT_ARG} {gpx_time_shift_seconds}")
+
     # Pass odo offset for shared GPX batch render.
     # The wrapper strips this arg and patches calculate_odo() to start from offset.
     if odo_offset is not None:
         cmd_parts.append(f"{TS_ODO_OFFSET_ARG} {odo_offset:.3f}")
 
     if amap_render:
+        if amap_map_style:
+            cmd_parts.append(f"{TS_AMAP_MAP_STYLE_ARG} {shlex.quote(amap_map_style)}")
         cmd_parts.append(TS_AMAP_RENDER_ARG)
 
     return " ".join(cmd_parts), temp_files

@@ -135,6 +135,85 @@ class TestFFMPEGGoProPatch:
 
         assert timecode is None
 
+    def test_lenient_ffprobe_json_loader_handles_windows_path_tags(self):
+        """ffprobe JSON may contain raw Windows backslashes in metadata tags."""
+        from gpstitch.patches.ffmpeg_gopro_patches import loads_ffprobe_json
+
+        data = loads_ffprobe_json(r'{"format": {"filename": "H:\318\path\DJI_20260509161038.MP4"}}')
+
+        assert data["format"]["filename"] == r"H:\318\path\DJI_20260509161038.MP4"
+
+    def test_lenient_ffprobe_json_loader_preserves_escaped_windows_path_tags(self):
+        """Already escaped path separators must not be changed into invalid JSON."""
+        from gpstitch.patches.ffmpeg_gopro_patches import loads_ffprobe_json
+
+        data = loads_ffprobe_json(r'{"format": {"filename": "H:\\318\\path\\DJI_20260509161038.MP4"}}')
+
+        assert data["format"]["filename"] == r"H:\318\path\DJI_20260509161038.MP4"
+
+    def test_lenient_ffprobe_json_loader_handles_mixed_windows_path_tags(self):
+        """Windows ffprobe output can mix escaped path separators with one raw backslash."""
+        from gpstitch.patches.ffmpeg_gopro_patches import loads_ffprobe_json
+
+        data = loads_ffprobe_json(
+            r'{"format": {"filename": "H:\\318川藏\\ac3\\0509\\新建文件夹\DJI_20260509161038.MP4"}}'
+        )
+
+        assert data["format"]["filename"] == r"H:\318川藏\ac3\0509\新建文件夹\DJI_20260509161038.MP4"
+
+    def test_lenient_ffprobe_json_loader_handles_raw_backslash_u_paths(self):
+        """A Windows directory starting with u is still a path separator, not a Unicode escape."""
+        from gpstitch.patches.ffmpeg_gopro_patches import loads_ffprobe_json
+
+        data = loads_ffprobe_json(r'{"format": {"filename": "C:\users\video.mp4"}}')
+
+        assert data["format"]["filename"] == r"C:\users\video.mp4"
+
+    def test_find_recording_handles_raw_windows_path_in_ffprobe_json(self):
+        """Patched FFMPEGGoPro.find_recording should tolerate unescaped path metadata."""
+        from gpstitch.patches import apply_patches
+
+        apply_patches()
+
+        from gopro_overlay.ffmpeg_gopro import FFMPEGGoPro
+
+        mock_ffmpeg = Mock()
+        mock_ffprobe = Mock()
+        mock_result = Mock()
+        mock_result.stdout = r'''{
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "disposition": {"default": 1},
+                    "avg_frame_rate": "30000/1001",
+                    "width": 3840,
+                    "height": 2160,
+                    "duration": "10.0",
+                    "nb_frames": "300"
+                }
+            ],
+            "format": {
+                "filename": "H:\318\path\DJI_20260509161038.MP4",
+                "tags": {"creation_time": "2026-05-09T16:10:38.000000Z"}
+            }
+        }'''
+        mock_ffprobe.invoke.return_value = mock_result
+        mock_ffmpeg.ffprobe.return_value = mock_ffprobe
+
+        class FakeStat:
+            st_size = 1
+            st_ctime = 0
+            st_atime = 0
+            st_mtime = 0
+
+        recording = FFMPEGGoPro(mock_ffmpeg).find_recording(Path("H:/318/path/DJI_20260509161038.MP4"), stat=lambda _: FakeStat())
+
+        assert recording.video.dimension.x == 3840
+        assert recording.video.dimension.y == 2160
+        assert recording.video.frame_count == 300
+        assert recording.creation_time.isoformat() == "2026-05-09T16:10:38+00:00"
+
 
 class TestFFMPEGOverlayVideoPatch:
     """Test patches for FFMPEGOverlayVideo class."""
@@ -356,8 +435,24 @@ class TestExtractCustomArgs:
         assert result["srt_path"] is None
         assert result["video_path"] is None
         assert result["odo_offset"] is None
+        assert result["gpx_time_shift_seconds"] == 0
         assert result["amap_render"] is False
+        assert result["amap_map_style"] is None
         assert sys.argv == ["script", "--gpx", "track.gpx", "--layout", "default"]
+
+    def test_extracts_gpx_time_shift(self, monkeypatch):
+        import sys
+
+        from gpstitch.scripts.gopro_dashboard_wrapper import _extract_custom_args
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["script", "--gpx", "track.gpx", "--ts-gpx-time-shift-seconds", "-28800", "--use-gpx-only"],
+        )
+        result = _extract_custom_args()
+        assert result["gpx_time_shift_seconds"] == -28800
+        assert sys.argv == ["script", "--gpx", "track.gpx", "--use-gpx-only"]
 
     def test_extracts_amap_render_flag(self, monkeypatch):
         import sys
@@ -368,6 +463,28 @@ class TestExtractCustomArgs:
         result = _extract_custom_args()
         assert result["amap_render"] is True
         assert sys.argv == ["script", "--layout", "xml", "--gpx", "track.gpx"]
+
+    def test_extracts_amap_map_style(self, monkeypatch):
+        import sys
+
+        from gpstitch.scripts.gopro_dashboard_wrapper import _extract_custom_args
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "script",
+                "--ts-amap-map-style",
+                "amap-jsapi-satellite",
+                "--ts-amap-render",
+                "--gpx",
+                "track.gpx",
+            ],
+        )
+        result = _extract_custom_args()
+        assert result["amap_render"] is True
+        assert result["amap_map_style"] == "amap-jsapi-satellite"
+        assert sys.argv == ["script", "--gpx", "track.gpx"]
 
     def test_extracts_args_at_end(self, monkeypatch):
         import sys

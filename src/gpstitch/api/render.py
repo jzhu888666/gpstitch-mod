@@ -1,5 +1,6 @@
 """Render job API endpoints."""
 
+import asyncio
 import contextlib
 import datetime
 import logging
@@ -7,7 +8,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from gpstitch.constants import (
@@ -20,12 +21,14 @@ from gpstitch.constants import (
     DEFAULT_UNITS_SPEED,
     DEFAULT_UNITS_TEMPERATURE,
 )
-from gpstitch.models.job import RenderJobConfig, migrate_video_time_alignment
+from gpstitch.models.job import Job, JobStatus, RenderJobConfig, migrate_video_time_alignment
 from gpstitch.models.schemas import FileRole
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.job_manager import job_manager
 from gpstitch.services.metadata import extract_gpx_fit_metadata, extract_video_metadata
+from gpstitch.services.power import power_service
 from gpstitch.services.render_service import render_service
+from gpstitch.services.runtime_settings import runtime_settings_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -87,6 +90,105 @@ class JobStatusResponse(BaseModel):
     started_at: str | None = None
     completed_at: str | None = None
     error: str | None = None
+    retry_count: int = 0
+    max_retries: int = 3
+
+
+class RenderJobListItem(BaseModel):
+    """Render job summary for the task manager."""
+
+    job_id: str
+    batch_id: str | None = None
+    status: str
+    video_name: str
+    source_file: str | None = None
+    output_file: str
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    progress: JobProgressResponse
+    error: str | None = None
+    can_cancel: bool = False
+    retry_count: int = 0
+    max_retries: int = 3
+
+
+class RenderJobListResponse(BaseModel):
+    """Recent render jobs."""
+
+    jobs: list[RenderJobListItem]
+    total: int
+    active_job_id: str | None = None
+    active_job_ids: list[str] = Field(default_factory=list)
+    render_concurrency: int = 1
+    shutdown_after_all_tasks: bool = False
+    shutdown_supported: bool = False
+    queue_mode: str = "concurrent"
+
+
+class RenderJobClearRequest(BaseModel):
+    """Request to remove finished render jobs from the task manager."""
+
+    statuses: list[JobStatus] = Field(
+        default_factory=lambda: [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]
+    )
+
+
+class RenderJobClearResponse(BaseModel):
+    """Response from finished-job cleanup."""
+
+    removed: int
+    statuses: list[str]
+
+
+class RenderJobBulkActionRequest(BaseModel):
+    """Request to apply an action to selected render jobs."""
+
+    job_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class RenderJobBulkActionResult(BaseModel):
+    """Result for one selected render job."""
+
+    job_id: str
+    status: str
+    detail: str | None = None
+
+
+class RenderJobBulkActionResponse(BaseModel):
+    """Response from a selected-job bulk action."""
+
+    requested: int
+    affected: int
+    skipped: int
+    jobs: list[RenderJobBulkActionResult]
+
+
+class RenderConcurrencyRequest(BaseModel):
+    """Request to update render concurrency."""
+
+    concurrency: int = Field(ge=1, le=3)
+
+
+class RenderConcurrencyResponse(BaseModel):
+    """Current render concurrency settings."""
+
+    concurrency: int
+    min_concurrency: int = 1
+    max_concurrency: int = 3
+
+
+class TaskShutdownSettingsRequest(BaseModel):
+    """Request to update the task-manager shutdown setting."""
+
+    enabled: bool
+
+
+class TaskShutdownSettingsResponse(BaseModel):
+    """Current task-manager shutdown setting."""
+
+    enabled: bool
+    supported: bool
 
 
 class JobLogsResponse(BaseModel):
@@ -118,6 +220,77 @@ class FileCheckResponse(BaseModel):
     total_checked: int
 
 
+TERMINAL_CLEAR_STATUS_ORDER = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+TERMINAL_CLEAR_STATUSES = set(TERMINAL_CLEAR_STATUS_ORDER)
+
+
+def _job_progress_response(job: Job) -> JobProgressResponse:
+    return JobProgressResponse(
+        percent=job.progress.percent,
+        current_frame=job.progress.current_frame,
+        total_frames=job.progress.total_frames,
+        fps=job.progress.fps,
+        eta_seconds=job.progress.eta_seconds,
+    )
+
+
+def _job_video_name_and_source(job: Job) -> tuple[str, str | None]:
+    primary = None
+    with contextlib.suppress(Exception):
+        primary = file_manager.get_primary_file(job.config.session_id)
+
+    if primary:
+        return primary.filename, primary.file_path
+
+    output_path = Path(job.config.output_file)
+    fallback_name = output_path.name or job.config.session_id
+    return fallback_name, None
+
+
+def _job_list_item(job: Job) -> RenderJobListItem:
+    video_name, source_file = _job_video_name_and_source(job)
+    return RenderJobListItem(
+        job_id=job.id,
+        batch_id=job.batch_id,
+        status=job.status.value,
+        video_name=video_name,
+        source_file=source_file,
+        output_file=job.config.output_file,
+        created_at=job.created_at.isoformat(),
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        progress=_job_progress_response(job),
+        error=job.error,
+        can_cancel=job.status in (JobStatus.PENDING, JobStatus.RUNNING),
+        retry_count=job.retry_count,
+        max_retries=job.max_retries,
+    )
+
+
+def _unique_job_ids(job_ids: list[str]) -> list[str]:
+    """Return non-empty job ids once, preserving selection order."""
+    return list(dict.fromkeys(job_id.strip() for job_id in job_ids if job_id and job_id.strip()))
+
+
+async def _cancel_render_job(job: Job) -> tuple[bool, str]:
+    """Cancel a queued or running render job and return action detail."""
+    if job.status == JobStatus.PENDING:
+        if render_service.is_job_active(job.id):
+            success = await render_service.cancel_render(job.id)
+            return success, "cancelled" if success else "Failed to cancel active queued job"
+        await job_manager.update_job_status(job.id, JobStatus.CANCELLED)
+        return True, "cancelled"
+
+    if job.is_terminal():
+        return False, "Job is already finished"
+
+    if not job.is_running():
+        return False, "Job cannot be cancelled"
+
+    success = await render_service.cancel_render(job.id)
+    return success, "cancelled" if success else "Failed to cancel running job"
+
+
 # --- Pre-check for batch render (overwrite + GPS quality) ---
 
 
@@ -131,7 +304,7 @@ class PreCheckFileInput(BaseModel):
 class PreCheckRequest(BaseModel):
     """Request to pre-check files before batch render."""
 
-    files: list[PreCheckFileInput] = Field(min_length=1, max_length=100)
+    files: list[PreCheckFileInput] = Field(min_length=1, max_length=1000)
     shared_gpx_path: str | None = None
     ffmpeg_profile: str | None = None
 
@@ -281,19 +454,12 @@ async def check_output_files(request: FileCheckRequest) -> FileCheckResponse:
 
 
 @router.post("/render/start", response_model=RenderJobResponse)
-async def start_render(request: RenderJobRequest, background_tasks: BackgroundTasks) -> RenderJobResponse:
+async def start_render(request: RenderJobRequest) -> RenderJobResponse:
     """Start a new render job."""
 
     # Validate session
     if not file_manager.session_exists(request.session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-
-    # Check if already rendering
-    if await job_manager.has_active_job():
-        current = await job_manager.get_current_job()
-        raise HTTPException(
-            status_code=409, detail=f"Another render job is already running: {current.id if current else 'unknown'}"
-        )
 
     # Get primary file info
     primary = file_manager.get_primary_file(request.session_id)
@@ -333,8 +499,9 @@ async def start_render(request: RenderJobRequest, background_tasks: BackgroundTa
     # Create job
     job = await job_manager.create_job(config)
 
-    # Start rendering in background
-    background_tasks.add_task(render_service.start_render, job.id, config)
+    # Start when a render slot is available. This only schedules render
+    # workers; it does not wait for the subprocesses to finish.
+    await render_service.kick_queue()
 
     logger.info(f"Queued render job {job.id} for session {request.session_id}")
 
@@ -368,6 +535,157 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
         started_at=job.started_at.isoformat() if job.started_at else None,
         completed_at=job.completed_at.isoformat() if job.completed_at else None,
         error=job.error,
+        retry_count=job.retry_count,
+        max_retries=job.max_retries,
+    )
+
+
+@router.get("/render/jobs", response_model=RenderJobListResponse)
+async def list_render_jobs(limit: int = Query(default=100, ge=1, le=500)) -> RenderJobListResponse:
+    """List recent render jobs for the task manager."""
+
+    jobs = await job_manager.list_jobs(limit=limit)
+    current = await job_manager.get_current_job()
+    running_jobs = await job_manager.get_running_jobs()
+    return RenderJobListResponse(
+        jobs=[_job_list_item(job) for job in jobs],
+        total=len(jobs),
+        active_job_id=current.id if current else None,
+        active_job_ids=[job.id for job in running_jobs],
+        render_concurrency=render_service.concurrency,
+        shutdown_after_all_tasks=runtime_settings_service.get_shutdown_after_all_tasks(False),
+        shutdown_supported=power_service.supports_shutdown(),
+    )
+
+
+@router.post("/render/jobs/clear", response_model=RenderJobClearResponse)
+async def clear_render_jobs(request: RenderJobClearRequest) -> RenderJobClearResponse:
+    """Remove completed, failed, and cancelled jobs from the task manager."""
+
+    requested = set(request.statuses)
+    if not requested:
+        raise HTTPException(status_code=400, detail="At least one status is required")
+
+    invalid = requested - TERMINAL_CLEAR_STATUSES
+    if invalid:
+        allowed = ", ".join(status.value for status in TERMINAL_CLEAR_STATUS_ORDER)
+        raise HTTPException(status_code=400, detail=f"Only finished jobs can be removed: {allowed}")
+
+    ordered_statuses = [status for status in TERMINAL_CLEAR_STATUS_ORDER if status in requested]
+    removed = await job_manager.remove_jobs_by_status(set(ordered_statuses))
+    return RenderJobClearResponse(
+        removed=removed,
+        statuses=[status.value for status in ordered_statuses],
+    )
+
+
+@router.post("/render/jobs/retry", response_model=RenderJobBulkActionResponse)
+async def retry_render_jobs(request: RenderJobBulkActionRequest) -> RenderJobBulkActionResponse:
+    """Retry selected failed render jobs."""
+
+    job_ids = _unique_job_ids(request.job_ids)
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="At least one job id is required")
+
+    results: list[RenderJobBulkActionResult] = []
+    affected = 0
+    for job_id in job_ids:
+        job = await job_manager.get_job(job_id)
+        if not job:
+            results.append(RenderJobBulkActionResult(job_id=job_id, status="skipped", detail="Job not found"))
+            continue
+
+        if job.status != JobStatus.FAILED:
+            results.append(
+                RenderJobBulkActionResult(job_id=job_id, status="skipped", detail="Only failed jobs can be retried")
+            )
+            continue
+
+        if await job_manager.retry_failed_job(job_id):
+            affected += 1
+            results.append(RenderJobBulkActionResult(job_id=job_id, status="retried"))
+        else:
+            results.append(RenderJobBulkActionResult(job_id=job_id, status="skipped", detail="Retry failed"))
+
+    if affected:
+        await render_service.kick_queue()
+
+    return RenderJobBulkActionResponse(
+        requested=len(job_ids),
+        affected=affected,
+        skipped=len(job_ids) - affected,
+        jobs=results,
+    )
+
+
+@router.post("/render/jobs/cancel", response_model=RenderJobBulkActionResponse)
+async def cancel_render_jobs(request: RenderJobBulkActionRequest) -> RenderJobBulkActionResponse:
+    """Cancel selected queued or running render jobs."""
+
+    job_ids = _unique_job_ids(request.job_ids)
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="At least one job id is required")
+
+    results: list[RenderJobBulkActionResult] = []
+    affected = 0
+    for job_id in job_ids:
+        job = await job_manager.get_job(job_id)
+        if not job:
+            results.append(RenderJobBulkActionResult(job_id=job_id, status="skipped", detail="Job not found"))
+            continue
+
+        success, detail = await _cancel_render_job(job)
+        if success:
+            affected += 1
+            results.append(RenderJobBulkActionResult(job_id=job_id, status="cancelled"))
+        else:
+            results.append(RenderJobBulkActionResult(job_id=job_id, status="skipped", detail=detail))
+
+    if affected:
+        await render_service.kick_queue()
+
+    return RenderJobBulkActionResponse(
+        requested=len(job_ids),
+        affected=affected,
+        skipped=len(job_ids) - affected,
+        jobs=results,
+    )
+
+
+@router.get("/render/concurrency", response_model=RenderConcurrencyResponse)
+async def get_render_concurrency() -> RenderConcurrencyResponse:
+    """Get current render concurrency."""
+
+    return RenderConcurrencyResponse(concurrency=render_service.concurrency)
+
+
+@router.put("/render/concurrency", response_model=RenderConcurrencyResponse)
+async def set_render_concurrency(request: RenderConcurrencyRequest) -> RenderConcurrencyResponse:
+    """Set current render concurrency."""
+
+    concurrency = await render_service.set_concurrency(request.concurrency)
+    return RenderConcurrencyResponse(concurrency=concurrency)
+
+
+@router.get("/render/task-shutdown", response_model=TaskShutdownSettingsResponse)
+async def get_task_shutdown_settings() -> TaskShutdownSettingsResponse:
+    """Get the task-manager shutdown setting."""
+
+    return TaskShutdownSettingsResponse(
+        enabled=runtime_settings_service.get_shutdown_after_all_tasks(False),
+        supported=power_service.supports_shutdown(),
+    )
+
+
+@router.put("/render/task-shutdown", response_model=TaskShutdownSettingsResponse)
+async def set_task_shutdown_settings(request: TaskShutdownSettingsRequest) -> TaskShutdownSettingsResponse:
+    """Enable or disable shutdown after all render tasks finish."""
+
+    enabled = runtime_settings_service.set_shutdown_after_all_tasks(request.enabled)
+    await render_service.arm_shutdown_after_all_tasks()
+    return TaskShutdownSettingsResponse(
+        enabled=enabled,
+        supported=power_service.supports_shutdown(),
     )
 
 
@@ -391,18 +709,18 @@ async def get_job_logs(job_id: str, tail: int = 100) -> JobLogsResponse:
 
 @router.post("/render/cancel/{job_id}")
 async def cancel_job(job_id: str) -> dict:
-    """Cancel a running render job."""
+    """Cancel a queued or running render job."""
 
     job = await job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if not job.is_running():
-        raise HTTPException(status_code=400, detail="Job is not running")
-
-    success = await render_service.cancel_render(job_id)
+    success, detail = await _cancel_render_job(job)
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to cancel job")
+        status_code = 400 if detail in {"Job is already finished", "Job cannot be cancelled"} else 500
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    await render_service.kick_queue()
 
     return {"job_id": job_id, "status": "cancelled"}
 
@@ -486,6 +804,8 @@ class BatchJobDetail(BaseModel):
     fps: float | None = None
     eta_seconds: float | None = None
     error: str | None = None
+    retry_count: int = 0
+    max_retries: int = 3
 
 
 class BatchStatusResponse(BaseModel):
@@ -499,6 +819,7 @@ class BatchStatusResponse(BaseModel):
     failed: int
     cancelled: int
     current_job: BatchJobDetail | None = None
+    running_jobs: list[BatchJobDetail] = Field(default_factory=list)
 
 
 def _calculate_batch_odo_offset(
@@ -515,12 +836,12 @@ def _calculate_batch_odo_offset(
 
     Returns offset in meters, or None if creation time cannot be determined.
     """
-    from gpstitch.services.renderer import _extract_creation_time, _validate_creation_time, calculate_odo_offset
-
-    creation_time = _extract_creation_time(video_path)
-    if creation_time is None:
-        logger.warning("Cannot determine creation time for %s, skipping odo offset", video_path)
-        return None
+    from gpstitch.services.renderer import (
+        _extract_creation_time,
+        _resolve_dji_filename_start_time,
+        _validate_creation_time,
+        calculate_odo_offset,
+    )
 
     video_duration_sec = 0.0
     try:
@@ -532,8 +853,16 @@ def _calculate_batch_odo_offset(
     except Exception as e:
         logger.warning("Failed to get video duration for odo offset alignment: %s", e)
 
-    result = _validate_creation_time(video_path, creation_time, video_duration_sec, gpx_path)
-    creation_time = result.time
+    creation_time = _resolve_dji_filename_start_time(video_path, video_duration_sec, gpx_path)
+    if creation_time is None:
+        creation_time = _extract_creation_time(video_path)
+
+    if creation_time is not None:
+        result = _validate_creation_time(video_path, creation_time, video_duration_sec, gpx_path)
+        creation_time = result.time
+    else:
+        logger.warning("Cannot determine creation time for %s, skipping odo offset", video_path)
+        return None
 
     if time_offset_seconds and video_time_alignment == "manual":
         creation_time = creation_time + datetime.timedelta(seconds=time_offset_seconds)
@@ -546,7 +875,7 @@ def _calculate_batch_odo_offset(
 
 
 @router.post("/render/batch", response_model=BatchRenderResponse)
-async def start_batch_render(request: BatchRenderRequest, background_tasks: BackgroundTasks) -> BatchRenderResponse:
+async def start_batch_render(request: BatchRenderRequest) -> BatchRenderResponse:
     """Start a batch of render jobs."""
 
     if not request.files:
@@ -558,25 +887,17 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
     if orphaned > 0:
         logger.info(f"Cleaned up {orphaned} orphaned pending jobs before batch start")
 
-    # Check if already rendering
-    if await job_manager.has_active_job():
-        current = await job_manager.get_current_job()
-        raise HTTPException(
-            status_code=409, detail=f"Another render job is already running: {current.id if current else 'unknown'}"
-        )
-
     batch_id = str(uuid4())
     job_ids = []
     skipped_files = []
 
-    for file_input in request.files:
+    async def prepare_batch_job(file_input: BatchFileInput) -> tuple[str | None, str | None]:
         video_path = Path(file_input.video_path)
 
         # Validate video file exists
         if not video_path.exists():
             logger.warning(f"Batch: skipping non-existent file: {video_path}")
-            skipped_files.append(str(video_path))
-            continue
+            return None, str(video_path)
 
         # Determine file type
         suffix = video_path.suffix.lower()
@@ -590,16 +911,21 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
             file_type = "srt"
         else:
             logger.warning(f"Batch: skipping unsupported file type: {video_path}")
-            skipped_files.append(str(video_path))
-            continue
+            return None, str(video_path)
 
         # Create local session for this file (skip cleanup to preserve previous batch sessions)
         session_id = file_manager.create_local_session(skip_cleanup=True)
 
         try:
             # Add primary file
-            video_metadata = extract_video_metadata(video_path) if file_type == "video" else None
-            gpx_fit_metadata = extract_gpx_fit_metadata(video_path) if file_type in {"gpx", "fit", "srt"} else None
+            video_metadata = (
+                await asyncio.to_thread(extract_video_metadata, video_path) if file_type == "video" else None
+            )
+            gpx_fit_metadata = (
+                await asyncio.to_thread(extract_gpx_fit_metadata, video_path)
+                if file_type in {"gpx", "fit", "srt"}
+                else None
+            )
             file_manager.add_file(
                 session_id=session_id,
                 filename=video_path.name,
@@ -612,6 +938,7 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
 
             # Add secondary GPX/FIT if provided (per-file takes priority over shared)
             effective_gpx = file_input.gpx_path or request.shared_gpx_path
+            gpx_path = None
             if effective_gpx:
                 try:
                     gpx_path = Path(effective_gpx).expanduser().resolve()
@@ -621,7 +948,7 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
                 if gpx_path and gpx_path.exists():
                     gpx_suffix = gpx_path.suffix.lower()
                     gpx_type = {".gpx": "gpx", ".fit": "fit", ".srt": "srt"}.get(gpx_suffix, "gpx")
-                    secondary_metadata = extract_gpx_fit_metadata(gpx_path)
+                    secondary_metadata = await asyncio.to_thread(extract_gpx_fit_metadata, gpx_path)
                     file_manager.add_file(
                         session_id=session_id,
                         filename=gpx_path.name,
@@ -650,7 +977,8 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
                 and gpx_path
                 and gpx_path.exists()
             ):
-                odo_offset = _calculate_batch_odo_offset(
+                odo_offset = await asyncio.to_thread(
+                    _calculate_batch_odo_offset,
                     video_path,
                     gpx_path,
                     request.time_offset_seconds,
@@ -680,23 +1008,35 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
 
             # Create job with batch_id
             job = await job_manager.create_job_with_batch(config, batch_id=batch_id)
-            job_ids.append(job.id)
+            return job.id, None
 
         except Exception as e:
             logger.error(f"Batch: failed to create job for {video_path}: {e}")
-            skipped_files.append(str(video_path))
             # Cleanup orphaned session
             with contextlib.suppress(Exception):
                 file_manager.cleanup_session(session_id)
-            continue
+            return None, str(video_path)
+
+    create_concurrency = max(1, min(3, int(render_service.concurrency)))
+    create_semaphore = asyncio.Semaphore(create_concurrency)
+
+    async def prepare_limited(file_input: BatchFileInput) -> tuple[str | None, str | None]:
+        async with create_semaphore:
+            return await prepare_batch_job(file_input)
+
+    results = await asyncio.gather(*(prepare_limited(file_input) for file_input in request.files))
+    for job_id, skipped_file in results:
+        if job_id:
+            job_ids.append(job_id)
+        if skipped_file:
+            skipped_files.append(skipped_file)
 
     if not job_ids:
         raise HTTPException(status_code=400, detail="No valid files to render")
 
-    # Start first job
-    first_job = await job_manager.get_job(job_ids[0])
-    if first_job:
-        background_tasks.add_task(render_service.start_render, first_job.id, first_job.config)
+    # Start as many jobs as the render concurrency allows. This only schedules
+    # render workers; it does not wait for the subprocesses to finish.
+    await render_service.kick_queue()
 
     logger.info(f"Created batch {batch_id} with {len(job_ids)} jobs")
 
@@ -716,26 +1056,30 @@ async def get_batch_status(batch_id: str) -> BatchStatusResponse:
     if counts["total"] == 0:
         raise HTTPException(status_code=404, detail="Batch not found")
 
-    # Get current running job details
-    current_job_detail = None
-    running_job = await job_manager.get_running_batch_job(batch_id)
-    if running_job:
-        # Extract video name from session
+    # Get running job details. current_job is kept for older clients, while
+    # running_jobs exposes the full concurrent state.
+    running_job_details = []
+    running_jobs = await job_manager.get_running_batch_jobs(batch_id)
+    for running_job in running_jobs:
         video_name = "Unknown"
         primary = file_manager.get_primary_file(running_job.config.session_id)
         if primary:
             video_name = primary.filename
 
-        current_job_detail = BatchJobDetail(
-            job_id=running_job.id,
-            status=running_job.status.value,
-            video_name=video_name,
-            progress_percent=running_job.progress.percent,
-            current_frame=running_job.progress.current_frame,
-            total_frames=running_job.progress.total_frames,
-            fps=running_job.progress.fps,
-            eta_seconds=running_job.progress.eta_seconds,
-            error=running_job.error,
+        running_job_details.append(
+            BatchJobDetail(
+                job_id=running_job.id,
+                status=running_job.status.value,
+                video_name=video_name,
+                progress_percent=running_job.progress.percent,
+                current_frame=running_job.progress.current_frame,
+                total_frames=running_job.progress.total_frames,
+                fps=running_job.progress.fps,
+                eta_seconds=running_job.progress.eta_seconds,
+                error=running_job.error,
+                retry_count=running_job.retry_count,
+                max_retries=running_job.max_retries,
+            )
         )
 
     return BatchStatusResponse(
@@ -746,7 +1090,8 @@ async def get_batch_status(batch_id: str) -> BatchStatusResponse:
         completed=counts["completed"],
         failed=counts["failed"],
         cancelled=counts["cancelled"],
-        current_job=current_job_detail,
+        current_job=running_job_details[0] if running_job_details else None,
+        running_jobs=running_job_details,
     )
 
 
@@ -759,17 +1104,32 @@ async def cancel_batch(batch_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Batch not found")
 
     cancelled_count = 0
+    cancelled_job_ids: set[str] = set()
+
+    # Release any reserved/running render slots first, including jobs that are
+    # still marked pending because their subprocess has not been spawned yet.
+    batch_jobs = await job_manager.get_batch_jobs(batch_id)
+    for job in batch_jobs:
+        if job.status in (JobStatus.PENDING, JobStatus.RUNNING) and render_service.is_job_active(job.id):
+            success = await render_service.cancel_render(job.id)
+            if success:
+                cancelled_job_ids.add(job.id)
 
     # Cancel all pending jobs
     pending_cancelled = await job_manager.cancel_batch_pending_jobs(batch_id)
     cancelled_count += pending_cancelled
 
     # Cancel running job if it belongs to this batch
-    running_job = await job_manager.get_running_batch_job(batch_id)
-    if running_job:
+    running_jobs = await job_manager.get_running_batch_jobs(batch_id)
+    for running_job in running_jobs:
+        if running_job.id in cancelled_job_ids:
+            continue
         success = await render_service.cancel_render(running_job.id)
         if success:
-            cancelled_count += 1
+            cancelled_job_ids.add(running_job.id)
+
+    cancelled_count += len(cancelled_job_ids)
+    await render_service.kick_queue()
 
     logger.info(f"Cancelled {cancelled_count} jobs in batch {batch_id}")
 

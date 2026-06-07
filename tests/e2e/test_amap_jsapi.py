@@ -10,6 +10,8 @@ window.AMapLoader = {
     function Map(container, options) {
       this.container = container;
       this.options = options || {};
+      window.__amapMapOptions = window.__amapMapOptions || [];
+      window.__amapMapOptions.push(this.options);
       this.add = function () {};
       this.setFitView = function () {};
       this.setCenter = function () {};
@@ -18,10 +20,13 @@ window.AMapLoader = {
     }
     function Polyline(options) { this.options = options || {}; }
     function Marker(options) { this.options = options || {}; }
+    function Satellite(options) { this.type = 'satellite'; this.options = options || {}; }
+    function RoadNet(options) { this.type = 'roadnet'; this.options = options || {}; }
     return Promise.resolve({
       Map,
       Polyline,
       Marker,
+      TileLayer: { Satellite, RoadNet },
       convertFrom: function (coords, type, callback) {
         window.__amapConvertBatches = (window.__amapConvertBatches || 0) + 1;
         callback('complete', {
@@ -118,14 +123,72 @@ def test_amap_provider_overlays_two_preview_widgets(page: Page, base_url: str, l
                     ]
                 },
                 imageMetrics: { left: 0, top: 0, width: 1920, height: 1080 },
+                mapStyle: 'amap-jsapi-satellite',
                 frameTimeMs: 500,
                 durationMs: 1000
             });
             return {
                 widgets: layer.querySelectorAll('.amap-widget').length,
-                batches: window.__amapConvertBatches || 0
+                batches: window.__amapConvertBatches || 0,
+                viewModes: (window.__amapMapOptions || []).map(options => options.viewMode),
+                pitches: (window.__amapMapOptions || []).map(options => options.pitch),
+                pitchEnables: (window.__amapMapOptions || []).map(options => options.pitchEnable),
+                layerTypes: (window.__amapMapOptions || []).map(options => (options.layers || []).map(layer => layer.type))
             };
         }"""
     )
 
-    assert widget_count == {"widgets": 2, "batches": 0}
+    assert widget_count == {
+        "widgets": 2,
+        "batches": 0,
+        "viewModes": ["3D", "3D"],
+        "pitches": [0, 0],
+        "pitchEnables": [False, False],
+        "layerTypes": [["satellite", "roadnet"], ["satellite", "roadnet"]],
+    }
+
+
+@pytest.mark.e2e
+def test_amap_provider_mixed_style_uses_standard_then_satellite(page: Page, base_url: str, live_server):
+    page.add_init_script("localStorage.setItem('gpstitch_language', 'en');")
+    page.goto(base_url)
+    page.wait_for_load_state("networkidle")
+    page.evaluate(MOCK_AMAP_LOADER)
+
+    layer_types = page.evaluate(
+        """async () => {
+            window.__amapMapOptions = [];
+            const layer = document.createElement('div');
+            document.body.appendChild(layer);
+            const provider = new window.AMapProvider();
+            await provider.render({
+                layer,
+                runtimeConfig: {
+                    configured: true,
+                    validated: true,
+                    key: 'mock-key',
+                    security_js_code: 'mock-security',
+                    key_fingerprint: 'mock'
+                },
+                context: {
+                    canvas_width: 1920,
+                    canvas_height: 1080,
+                    route_points: [
+                        { lat: 30.0, lon: 120.0 },
+                        { lat: 30.1, lon: 120.1 }
+                    ],
+                    map_widgets: [
+                        { name: 'moving_map', type: 'moving_map', x: 1644, y: 100, width: 256, height: 256, zoom: 16, corner_radius: 35 },
+                        { name: 'journey_map', type: 'journey_map', x: 1644, y: 376, width: 256, height: 256, zoom: 16, corner_radius: 35 }
+                    ]
+                },
+                imageMetrics: { left: 0, top: 0, width: 1920, height: 1080 },
+                mapStyle: 'amap-jsapi-mixed',
+                frameTimeMs: 500,
+                durationMs: 1000
+            });
+            return (window.__amapMapOptions || []).map(options => (options.layers || []).map(layer => layer.type));
+        }"""
+    )
+
+    assert layer_types == [[], ["satellite", "roadnet"]]

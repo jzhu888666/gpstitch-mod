@@ -11,7 +11,10 @@ class AMapProvider {
     }
 
     isAmapStyle(style) {
-        return style === 'amap-jsapi' || style === 'amap';
+        return style === 'amap-jsapi'
+            || style === 'amap-jsapi-satellite'
+            || style === 'amap-jsapi-mixed'
+            || style === 'amap';
     }
 
     async validate(runtimeConfig) {
@@ -39,6 +42,7 @@ class AMapProvider {
             runtimeConfig,
             context,
             imageMetrics,
+            mapStyle = null,
             frameTimeMs = 0,
             durationMs = 0,
         } = options;
@@ -60,17 +64,24 @@ class AMapProvider {
         const scaleY = imageMetrics.height / Math.max(1, context.canvas_height || imageMetrics.height);
         const routeState = this._currentRouteState(convertedRoute, frameTimeMs, durationMs);
         const currentPoint = routeState.point;
+        const effectiveMapStyle = mapStyle || context.map_style || 'amap-jsapi';
 
         for (const widget of context.map_widgets) {
             const isMovingMap = widget.type === 'moving_map';
             const isJourneyMap = widget.type === 'journey_map' || widget.type === 'moving_journey_map';
-            const shouldDrawRoute = convertedRoute.length > 1 && (isMovingMap || isJourneyMap);
-            const rotationDegrees = widget.rotate === false ? null : routeState.heading;
+            const widgetMapStyle = this._mapStyleForWidget(effectiveMapStyle, widget.type);
+            const shouldUseRouteForFit = convertedRoute.length > 1 && isJourneyMap && !isMovingMap;
+            const headingDegrees = widget.rotate === false ? null : routeState.heading;
+            const mapRotationDegrees = this._mapRotationDegrees(headingDegrees);
             const widgetWidth = Math.max(1, Math.round(widget.width * scaleX));
             const widgetHeight = Math.max(1, Math.round(widget.height * scaleY));
-            const mapSize = (isMovingMap || rotationDegrees !== null)
-                ? Math.max(widgetWidth, widgetHeight, this._movingBackingSize(widgetWidth, widgetHeight))
-                : Math.max(widgetWidth, widgetHeight);
+            const mapSize = isJourneyMap && !isMovingMap && headingDegrees !== null
+                ? this._journeyBackingSize(widgetWidth, widgetHeight)
+                : (
+                    (isMovingMap || headingDegrees !== null)
+                        ? Math.max(widgetWidth, widgetHeight, this._movingBackingSize(widgetWidth, widgetHeight))
+                        : Math.max(widgetWidth, widgetHeight)
+                );
             const widgetEl = document.createElement('div');
             widgetEl.className = 'amap-widget';
             widgetEl.style.left = `${Math.round(widget.x * scaleX)}px`;
@@ -90,23 +101,32 @@ class AMapProvider {
             layer.appendChild(widgetEl);
 
             const center = currentPoint || convertedRoute[0] || [116.397428, 39.90923];
-            const map = new AMap.Map(mapEl, {
-                viewMode: '2D',
+            const mapOptions = {
+                viewMode: '3D',
+                pitch: 0,
                 resizeEnable: true,
                 zoom: widget.zoom || 16,
                 center,
-            });
+                rotateEnable: false,
+                pitchEnable: false,
+                rotation: mapRotationDegrees === null ? 0 : mapRotationDegrees,
+            };
+            const mapLayers = this._mapLayersForStyle(AMap, widgetMapStyle);
+            if (mapLayers) {
+                mapOptions.layers = mapLayers;
+            }
+            const map = new AMap.Map(mapEl, mapOptions);
 
             const overlays = [];
-            if (shouldDrawRoute) {
+            if (shouldUseRouteForFit) {
                 const polyline = new AMap.Polyline({
                     path: convertedRoute,
                     showDir: false,
                     strokeColor: widget.line_fill || '#1f8fff',
-                    strokeOpacity: 0.9,
-                    strokeWeight: Math.max(1, Number(widget.line_width || 5)),
+                    strokeOpacity: 0,
+                    strokeWeight: 1,
                     lineJoin: 'round',
-                    zIndex: 20,
+                    zIndex: 1,
                 });
                 map.add(polyline);
                 overlays.push(polyline);
@@ -124,20 +144,20 @@ class AMapProvider {
             }
 
             if (isJourneyMap && !isMovingMap && overlays.length > 0) {
-                const fitPadding = rotationDegrees !== null ? Math.round(Math.min(widgetWidth, widgetHeight) / 2) : 0;
+                const fitPadding = headingDegrees !== null ? this._rotationSafePadding(widgetWidth, widgetHeight) : 0;
                 map.setFitView(overlays, false, [fitPadding, fitPadding, fitPadding, fitPadding]);
             } else if (currentPoint) {
                 map.setCenter(currentPoint);
                 map.setZoom(widget.zoom || 16);
             }
 
+            this._applyMapRotation(map, mapRotationDegrees);
             await this._waitMapSettled(map);
             this._applyMapViewport(
                 mapEl,
                 widgetWidth,
                 widgetHeight,
-                this._pointToContainerPixel(map, currentPoint, mapSize),
-                rotationDegrees
+                this._pointToContainerPixel(map, currentPoint, mapSize)
             );
             this.maps.push(map);
         }
@@ -335,6 +355,44 @@ class AMapProvider {
         return Math.floor(Math.sqrt((width ** 2) + (height ** 2)));
     }
 
+    _journeyBackingSize(width, height) {
+        return Math.ceil(Math.max(width, height) * 2);
+    }
+
+    _rotationSafePadding(width, height) {
+        return Math.ceil((Math.min(width, height) * Math.SQRT2) / 2 + 16);
+    }
+
+    _mapLayersForStyle(AMap, mapStyle) {
+        if (mapStyle === 'amap-jsapi-satellite') {
+            return [
+                new AMap.TileLayer.Satellite({ zIndex: 3 }),
+                new AMap.TileLayer.RoadNet({ zIndex: 4 }),
+            ];
+        }
+        return null;
+    }
+
+    _mapStyleForWidget(mapStyle, widgetType) {
+        if (mapStyle === 'amap-jsapi-mixed') {
+            return widgetType === 'journey_map' || widgetType === 'moving_journey_map'
+                ? 'amap-jsapi-satellite'
+                : 'amap-jsapi';
+        }
+        return mapStyle;
+    }
+
+    _mapRotationDegrees(headingDegrees) {
+        const heading = Number(headingDegrees);
+        if (!Number.isFinite(heading)) return null;
+        return (360 - (Math.round(heading) % 360) + 360) % 360;
+    }
+
+    _applyMapRotation(map, rotationDegrees) {
+        if (rotationDegrees === null || typeof map?.setRotation !== 'function') return;
+        map.setRotation(rotationDegrees);
+    }
+
     _waitMapSettled(map) {
         return new Promise(resolve => {
             if (!map || typeof map.on !== 'function') {
@@ -368,15 +426,13 @@ class AMapProvider {
         return { x: mapSize / 2, y: mapSize / 2 };
     }
 
-    _applyMapViewport(mapEl, widgetWidth, widgetHeight, currentPixel, rotationDegrees) {
+    _applyMapViewport(mapEl, widgetWidth, widgetHeight, currentPixel) {
         const x = Number.isFinite(currentPixel?.x) ? currentPixel.x : mapEl.offsetWidth / 2;
         const y = Number.isFinite(currentPixel?.y) ? currentPixel.y : mapEl.offsetHeight / 2;
         mapEl.style.left = `${Math.round(widgetWidth / 2 - x)}px`;
         mapEl.style.top = `${Math.round(widgetHeight / 2 - y)}px`;
         mapEl.style.transformOrigin = `${x}px ${y}px`;
-        mapEl.style.transform = rotationDegrees === null || rotationDegrees === undefined
-            ? ''
-            : `rotate(${-rotationDegrees}deg)`;
+        mapEl.style.transform = '';
     }
 }
 

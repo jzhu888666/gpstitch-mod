@@ -1,11 +1,11 @@
 """Metadata extraction service using gopro_overlay."""
 
-import json
 import logging
 from pathlib import Path
 
 from gpstitch.config import settings
 from gpstitch.models.schemas import GpxFitMetadata, VideoMetadata
+from gpstitch.patches.ffmpeg_gopro_patches import loads_ffprobe_json
 
 # Apply runtime patches if enabled
 if settings.enable_gopro_patches:
@@ -31,7 +31,7 @@ def get_video_rotation(file_path: Path) -> int:
         output = (
             ffmpeg.ffprobe().invoke(["-hide_banner", "-print_format", "json", "-show_streams", str(file_path)]).stdout
         )
-        data = json.loads(str(output))
+        data = loads_ffprobe_json(str(output))
         for stream in data.get("streams", []):
             if stream.get("codec_type") == "video":
                 for sd in stream.get("side_data_list", []):

@@ -14,8 +14,11 @@ from gpstitch.models.schemas import FileRole
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.renderer import (
     _align_timezone,
+    _detect_gpx_time_shift_seconds,
     _extract_creation_time,
     _get_gps_time_range,
+    _resolve_dji_filename_start_time,
+    _shift_timeseries_datetimes,
     _validate_creation_time,
 )
 
@@ -40,7 +43,7 @@ class TimeSyncAnalyzeResponse(BaseModel):
     video_start: str = Field(description="ISO UTC datetime string")
     video_duration_sec: float
     source: str = Field(
-        description="'media-created' | 'system-tz' | 'exhaustive' | 'mtime' | 'file-created' | 'failed'"
+        description="'media-created' | 'system-tz' | 'exhaustive' | 'dji-filename' | 'mtime' | 'file-created' | 'failed'"
     )
     overlap: OverlapInfo | None = None
     gps_start: str | None = Field(default=None, description="GPS track start time, ISO UTC")
@@ -83,6 +86,7 @@ def _calculate_overlap(
     video_start: datetime.datetime,
     video_duration_sec: float,
     gpx_path: Path,
+    gps_time_shift_seconds: int = 0,
 ) -> OverlapInfo | None:
     """Calculate overlap between video time range and GPX/FIT/SRT track."""
     from gopro_overlay.units import units
@@ -104,6 +108,8 @@ def _calculate_overlap(
             from gopro_overlay.loading import load_external
 
             timeseries = load_external(gpx_path, units)
+            if gps_time_shift_seconds:
+                timeseries = _shift_timeseries_datetimes(timeseries, gps_time_shift_seconds)
         entries = timeseries.items()
         if not entries:
             return None
@@ -214,7 +220,12 @@ def _analyze_sync(
     tz_correction_hours = None
     correction_reason = None
     suggested_manual_offset_seconds = None
-    if creation_time is not None:
+    dji_start = _resolve_dji_filename_start_time(video_path, video_duration_sec, gpx_path)
+    if dji_start is not None:
+        video_start = dji_start
+        source = "dji-filename"
+        correction_reason = "Using DJI filename recording start time"
+    elif creation_time is not None:
         # Cross-validate against GPS data to detect cameras with local-time creation_time
         result = _validate_creation_time(video_path, creation_time, video_duration_sec, gpx_path)
         video_start = result.time
@@ -232,6 +243,9 @@ def _analyze_sync(
         elif result.correction_type == "mtime":
             source = "mtime"
             correction_reason = "Using file modification time (creation_time didn't match)"
+        elif result.correction_type == "dji-filename":
+            source = "dji-filename"
+            correction_reason = "Using DJI filename recording start time"
         elif result.suggested_offset_seconds is not None:
             source = "failed"
             suggested_manual_offset_seconds = result.suggested_offset_seconds
@@ -253,11 +267,18 @@ def _analyze_sync(
     gps_start_iso = None
     gps_end_iso = None
     if gpx_path is not None:
-        overlap = _calculate_overlap(video_start, video_duration_sec, gpx_path)
+        gps_time_shift_seconds = _detect_gpx_time_shift_seconds(video_start, video_duration_sec, gpx_path, source)
+        overlap = _calculate_overlap(video_start, video_duration_sec, gpx_path, gps_time_shift_seconds)
         gps_range = _get_gps_time_range(gpx_path)
         if gps_range:
-            gps_start_iso = datetime.datetime.fromtimestamp(gps_range[0], tz=datetime.UTC).isoformat()
-            gps_end_iso = datetime.datetime.fromtimestamp(gps_range[1], tz=datetime.UTC).isoformat()
+            gps_start_iso = datetime.datetime.fromtimestamp(
+                gps_range[0] + gps_time_shift_seconds,
+                tz=datetime.UTC,
+            ).isoformat()
+            gps_end_iso = datetime.datetime.fromtimestamp(
+                gps_range[1] + gps_time_shift_seconds,
+                tz=datetime.UTC,
+            ).isoformat()
 
     return TimeSyncAnalyzeResponse(
         video_start=video_start.isoformat(),

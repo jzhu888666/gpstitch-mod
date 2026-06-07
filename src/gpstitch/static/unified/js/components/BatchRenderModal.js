@@ -13,6 +13,9 @@ class BatchRenderModal {
         this.logPollInterval = null;
         this.currentJobId = null;
         this.localMode = false;
+        this.selectedVideoDirs = [];
+        this.selectedGpsDirs = [];
+        this.directoryPickerInProgress = null;
 
         // Prevent overlapping requests
         this._statusRequestPending = false;
@@ -67,6 +70,14 @@ class BatchRenderModal {
                             </p>
                             <div class="batch-picker-actions batch-local-picker" style="display: none;">
                                 <button id="batch-select-video-dir" class="btn btn-sm btn-secondary">Select Video Folder</button>
+                                <button id="batch-select-gps-dir" class="btn btn-sm btn-secondary">Select GPS Folder</button>
+                                <button id="batch-clear-dirs" class="btn btn-sm btn-secondary">Clear Folders</button>
+                                <label class="checkbox-label batch-recursive-label">
+                                    <input type="checkbox" id="batch-recursive-dirs">
+                                    <span>Include subfolders</span>
+                                </label>
+                            </div>
+                            <div class="batch-picker-status batch-local-picker" style="display: none;">
                                 <small id="batch-directory-status" class="form-hint"></small>
                             </div>
                             <div class="form-group">
@@ -209,6 +220,9 @@ class BatchRenderModal {
         this.sharedGpxInput = document.getElementById('batch-shared-gpx');
         this.selectSharedGpsBtn = document.getElementById('batch-select-shared-gps');
         this.selectVideoDirBtn = document.getElementById('batch-select-video-dir');
+        this.selectGpsDirBtn = document.getElementById('batch-select-gps-dir');
+        this.clearDirsBtn = document.getElementById('batch-clear-dirs');
+        this.recursiveDirsCheckbox = document.getElementById('batch-recursive-dirs');
         this.directoryStatusEl = document.getElementById('batch-directory-status');
         this.timeOffsetInput = document.getElementById('batch-time-offset');
         this.helpText = document.getElementById('batch-help-text');
@@ -226,7 +240,10 @@ class BatchRenderModal {
 
         this.sharedGpxInput.addEventListener('input', () => this._onSharedGpxChange());
         this.selectSharedGpsBtn?.addEventListener('click', () => this._selectSharedGps());
-        this.selectVideoDirBtn?.addEventListener('click', () => this._selectVideoDirectory());
+        this.selectVideoDirBtn?.addEventListener('click', () => this._selectDirectories('video'));
+        this.selectGpsDirBtn?.addEventListener('click', () => this._selectDirectories('gps'));
+        this.clearDirsBtn?.addEventListener('click', () => this._clearSelectedDirectories());
+        this.recursiveDirsCheckbox?.addEventListener('change', () => this._refreshSelectedDirectories());
 
         this.logToggleBtn.addEventListener('click', () => {
             const isHidden = this.logContent.style.display === 'none';
@@ -308,6 +325,9 @@ class BatchRenderModal {
             this.filesInput.placeholder = '/path/to/video1.mp4\n/path/to/video2.mp4, /path/to/track2.gpx\n/path/to/video3.mp4';
         }
         window.i18n?.apply(this.modal);
+        if (this.selectedVideoDirs.length) {
+            this._refreshSelectedDirectories();
+        }
         this._updateFileCount();
     }
 
@@ -383,11 +403,22 @@ class BatchRenderModal {
     }
 
     async _selectVideoDirectory() {
+        await this._selectDirectories('video');
+    }
+
+    async _selectDirectories(kind) {
+        if (this.directoryPickerInProgress) {
+            return;
+        }
+
+        this.directoryPickerInProgress = kind;
+        this._setDirectoryPickerBusy(true);
         try {
-            const pickerResponse = await fetch('/api/local/select-directory', {
+            const pickerResponse = await fetch('/api/local/select-directories', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    title: kind === 'gps' ? 'Select GPS folders' : 'Select video folders',
                     language: this.state.language || window.i18n?.getLanguage?.() || 'zh-CN'
                 })
             });
@@ -400,17 +431,51 @@ class BatchRenderModal {
                 return;
             }
 
-            const listResponse = await fetch('/api/local/list-directory', {
+            const selectedDirs = pickerData.directory_paths || [];
+            if (selectedDirs.length === 0) return;
+            this._addUniqueDirectories(kind, selectedDirs);
+            await this._refreshSelectedDirectories();
+        } catch (error) {
+            console.error('Directory selection failed:', error);
+            window.toast?.error(error.message, { title: window.i18n?.t('Directory Picker Failed') || 'Directory Picker Failed' });
+        } finally {
+            this.directoryPickerInProgress = null;
+            this._setDirectoryPickerBusy(false);
+        }
+    }
+
+    _setDirectoryPickerBusy(isBusy) {
+        if (this.selectVideoDirBtn) {
+            this.selectVideoDirBtn.disabled = isBusy;
+        }
+        if (this.selectGpsDirBtn) {
+            this.selectGpsDirBtn.disabled = isBusy;
+        }
+        if (this.clearDirsBtn) {
+            this.clearDirsBtn.disabled = isBusy;
+        }
+    }
+
+    async _refreshSelectedDirectories() {
+        if (!this.selectedVideoDirs.length) {
+            this._setDirectoryStatus('');
+            return;
+        }
+
+        try {
+            const multiResponse = await fetch('/api/local/list-directories', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    directory_path: pickerData.directory_path,
+                    directory_paths: this.selectedVideoDirs,
+                    gps_directory_paths: this.selectedGpsDirs,
+                    recursive: !!this.recursiveDirsCheckbox?.checked,
                     language: this.state.language || window.i18n?.getLanguage?.() || 'zh-CN'
                 })
             });
-            const listData = await listResponse.json();
-            if (!listResponse.ok) {
-                throw new Error(listData.detail || listData.message || 'Failed to list directory');
+            const listData = await multiResponse.json();
+            if (!multiResponse.ok) {
+                throw new Error(listData.detail || listData.message || 'Failed to list directories');
             }
 
             const hasSharedGpx = this.sharedGpxInput.value.trim().length > 0;
@@ -418,9 +483,7 @@ class BatchRenderModal {
                 .map(file => this._formatBatchLine(file, hasSharedGpx))
                 .join('\n');
             this._updateFileCount();
-            if (this.directoryStatusEl) {
-                this.directoryStatusEl.textContent = listData.message || '';
-            }
+            this._setDirectoryStatus(this._formatDirectoryStatus(listData));
             if (window.toast && listData.message) {
                 window.toast.success(`${listData.message} ${listData.total_videos || 0}`, {
                     title: window.i18n?.t('Batch Directory') || 'Batch Directory',
@@ -428,9 +491,41 @@ class BatchRenderModal {
                 });
             }
         } catch (error) {
-            console.error('Video directory selection failed:', error);
+            console.error('Directory scan failed:', error);
             window.toast?.error(error.message, { title: window.i18n?.t('Directory Picker Failed') || 'Directory Picker Failed' });
         }
+    }
+
+    _addUniqueDirectories(kind, paths) {
+        const target = kind === 'gps' ? this.selectedGpsDirs : this.selectedVideoDirs;
+        const existing = new Set(target.map(path => path.toLowerCase()));
+        for (const path of paths) {
+            if (!path || existing.has(path.toLowerCase())) continue;
+            target.push(path);
+            existing.add(path.toLowerCase());
+        }
+    }
+
+    _clearSelectedDirectories() {
+        this.selectedVideoDirs = [];
+        this.selectedGpsDirs = [];
+        this.filesInput.value = '';
+        this._updateFileCount();
+        this._setDirectoryStatus('');
+    }
+
+    _setDirectoryStatus(text) {
+        if (this.directoryStatusEl) {
+            this.directoryStatusEl.textContent = text || '';
+        }
+    }
+
+    _formatDirectoryStatus(data) {
+        const videoDirs = this.selectedVideoDirs.length;
+        const gpsDirs = this.selectedGpsDirs.length;
+        const videos = data.total_videos || 0;
+        const matchedGps = data.total_matched_gps || 0;
+        return `${videoDirs} video folder(s), ${gpsDirs} GPS folder(s), ${videos} video(s), ${matchedGps} matched GPS`;
     }
 
     _formatBatchLine(file, hasSharedGpx) {
@@ -730,6 +825,13 @@ class BatchRenderModal {
         const data = await response.json();
         this.batchId = data.batch_id;
         this.jobIds = data.job_ids;
+        document.dispatchEvent(new CustomEvent('render-queue:changed', {
+            detail: {
+                source: 'batch',
+                batchId: this.batchId,
+                jobIds: this.jobIds,
+            }
+        }));
 
         // Show warning for skipped files
         if (data.skipped_files && data.skipped_files.length > 0) {
@@ -954,10 +1056,16 @@ class BatchRenderModal {
         this.batchId = null;
         this.jobIds = [];
         this.currentJobId = null;
+        this.selectedVideoDirs = [];
+        this.selectedGpsDirs = [];
         this._statusRequestPending = false;
         this._logsRequestPending = false;
         this.sharedGpxInput.value = '';
         this.timeOffsetInput.value = '0';
+        if (this.recursiveDirsCheckbox) {
+            this.recursiveDirsCheckbox.checked = false;
+        }
+        this._setDirectoryStatus('');
         this._onSharedGpxChange();
         this.filesInput.value = '';
         this._updateFileCount();

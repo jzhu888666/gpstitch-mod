@@ -25,9 +25,11 @@ async def generate_command(request: CommandRequest) -> CommandResponse:
     # Extract GPX/FIT options
     gpx_merge_mode = "OVERWRITE"
     video_time_alignment = None
+    time_offset_seconds = 0
     if request.gpx_fit_options:
         gpx_merge_mode = request.gpx_fit_options.merge_mode
         video_time_alignment = request.gpx_fit_options.video_time_alignment
+        time_offset_seconds = request.gpx_fit_options.time_offset_seconds
 
     # Generate the command (temp_files are not needed for display-only use)
     amap_render = is_amap_style(request.map_style)
@@ -50,9 +52,11 @@ async def generate_command(request: CommandRequest) -> CommandResponse:
         map_style=None if amap_render else backend_map_style(request.map_style),
         gpx_merge_mode=gpx_merge_mode,
         video_time_alignment=video_time_alignment,
+        time_offset_seconds=time_offset_seconds,
         ffmpeg_profile=request.ffmpeg_profile,
         language=request.language,
         amap_render=amap_render,
+        amap_map_style=request.map_style if amap_render else None,
     )
 
     return CommandResponse(

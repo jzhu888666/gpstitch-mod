@@ -8,7 +8,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from gpstitch.config import settings
-from gpstitch.models.job import Job, JobStatus, JobType, RenderJobConfig
+from gpstitch.models.job import Job, JobProgress, JobStatus, JobType, RenderJobConfig
+from gpstitch.models.schemas import FileInfo, FileRole
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,9 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         self._lock = asyncio.Lock()
 
-        # Current running job (only one at a time)
+        # Running jobs. _current_job_id is kept for older callers/tests that
+        # still expect a single current job, and points to the oldest running job.
+        self._running_job_ids: set[str] = set()
         self._current_job_id: str | None = None
 
         # Load persisted jobs on startup
@@ -50,8 +53,13 @@ class JobManager:
                     self._persist_job(job)
                     logger.warning(f"Marked job {job.id} as failed due to server restart")
 
-                # Mark pending jobs with local sessions as failed (local sessions are in-memory only)
-                elif job.status == JobStatus.PENDING and job.config.session_id.startswith("local:"):
+                # Mark old pending jobs with local sessions as failed when they
+                # have no file snapshot to restore after restart.
+                elif (
+                    job.status == JobStatus.PENDING
+                    and job.config.session_id.startswith("local:")
+                    and not job.session_files
+                ):
                     job.status = JobStatus.FAILED
                     job.error = "Server restarted - local session lost"
                     job.completed_at = datetime.now(UTC)
@@ -66,6 +74,15 @@ class JobManager:
         job_file = self._job_file_path(job.id)
         job_file.write_text(job.model_dump_json(indent=2), encoding="utf-8")
 
+    def _snapshot_session_files(self, config: RenderJobConfig) -> list[FileInfo]:
+        """Capture the files behind a render session so queued jobs can be retried after restart."""
+        try:
+            from gpstitch.services.file_manager import file_manager
+
+            return list(file_manager.get_files(config.session_id))
+        except Exception:
+            return []
+
     async def create_job(self, config: RenderJobConfig) -> Job:
         """Create a new render job."""
         async with self._lock:
@@ -75,6 +92,7 @@ class JobManager:
                 status=JobStatus.PENDING,
                 config=config,
                 created_at=datetime.now(UTC),
+                session_files=self._snapshot_session_files(config),
             )
 
             self._jobs[job.id] = job
@@ -89,18 +107,45 @@ class JobManager:
 
     async def list_jobs(self, limit: int = 50) -> list[Job]:
         """List recent jobs, newest first."""
-        jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+        jobs = [
+            job
+            for _, job in sorted(
+                enumerate(self._jobs.values()),
+                key=lambda item: (item[1].created_at, item[0]),
+                reverse=True,
+            )
+        ]
         return jobs[:limit]
 
+    def _running_jobs_unlocked(self) -> list[Job]:
+        """Return running jobs in stable FIFO order."""
+        jobs = [j for j in self._jobs.values() if j.status == JobStatus.RUNNING]
+        return sorted(jobs, key=lambda j: j.started_at or j.created_at)
+
+    def _sync_current_job_unlocked(self) -> None:
+        """Refresh compatibility fields from actual job statuses."""
+        running_jobs = self._running_jobs_unlocked()
+        self._running_job_ids = {job.id for job in running_jobs}
+        self._current_job_id = running_jobs[0].id if running_jobs else None
+
     async def get_current_job(self) -> Job | None:
-        """Get the currently running job."""
-        if self._current_job_id:
-            return self._jobs.get(self._current_job_id)
-        return None
+        """Get the oldest currently running job, if any."""
+        self._sync_current_job_unlocked()
+        return self._jobs.get(self._current_job_id) if self._current_job_id else None
+
+    async def get_running_jobs(self) -> list[Job]:
+        """Get all currently running jobs."""
+        self._sync_current_job_unlocked()
+        return self._running_jobs_unlocked()
+
+    async def active_job_count(self) -> int:
+        """Count currently running jobs."""
+        self._sync_current_job_unlocked()
+        return len(self._running_job_ids)
 
     async def has_active_job(self) -> bool:
-        """Check if there's an active job running."""
-        return self._current_job_id is not None
+        """Check if there's at least one active job running."""
+        return await self.active_job_count() > 0
 
     async def update_job_status(self, job_id: str, status: JobStatus, error: str | None = None):
         """Update job status."""
@@ -115,11 +160,12 @@ class JobManager:
 
             if status == JobStatus.RUNNING:
                 job.started_at = datetime.now(UTC)
-                self._current_job_id = job_id
+                self._running_job_ids.add(job_id)
             elif status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
                 job.completed_at = datetime.now(UTC)
-                if self._current_job_id == job_id:
-                    self._current_job_id = None
+                self._running_job_ids.discard(job_id)
+
+            self._sync_current_job_unlocked()
 
             self._persist_job(job)
             logger.info(f"Job {job_id} status updated to {status}")
@@ -166,6 +212,74 @@ class JobManager:
             if len(job.log_lines) > 500:
                 job.log_lines = job.log_lines[-500:]
 
+    async def reset_job_for_retry(self, job_id: str, error: str) -> bool:
+        """Requeue a failed render attempt if retry budget remains."""
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job.status == JobStatus.CANCELLED or job.retry_count >= job.max_retries:
+                return False
+
+            job.retry_count += 1
+            job.status = JobStatus.PENDING
+            job.started_at = None
+            job.completed_at = None
+            job.progress = JobProgress()
+            job.error = None
+            job.pid = None
+            self._running_job_ids.discard(job_id)
+
+            job.log_lines.append(f"\n=== Retry {job.retry_count}/{job.max_retries} ===")
+            job.log_lines.append(f"Previous failure: {error}")
+            if len(job.log_lines) > 500:
+                job.log_lines = job.log_lines[-500:]
+
+            self._sync_current_job_unlocked()
+            self._persist_job(job)
+            logger.warning(
+                "Requeued job %s for retry %s/%s after failure: %s",
+                job_id,
+                job.retry_count,
+                job.max_retries,
+                error,
+            )
+            return True
+
+    async def retry_failed_job(self, job_id: str, reason: str = "Manual retry requested") -> bool:
+        """Requeue a failed job from a user-triggered retry action."""
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job.status != JobStatus.FAILED:
+                return False
+
+            job.status = JobStatus.PENDING
+            job.started_at = None
+            job.completed_at = None
+            job.progress = JobProgress()
+            job.error = None
+            job.pid = None
+            # Manual retries start a fresh automatic retry budget.
+            job.retry_count = 0
+            self._running_job_ids.discard(job_id)
+
+            job.log_lines.append("\n=== Manual retry ===")
+            job.log_lines.append(reason)
+            if len(job.log_lines) > 500:
+                job.log_lines = job.log_lines[-500:]
+
+            self._sync_current_job_unlocked()
+            self._persist_job(job)
+            logger.info("Manually requeued failed job %s", job_id)
+            return True
+
+    async def set_job_session_files(self, job_id: str, files: list[FileInfo]) -> None:
+        """Persist a recovered render session file snapshot for future retries."""
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            job.session_files = list(files)
+            self._persist_job(job)
+
     async def set_job_pid(self, job_id: str, pid: int):
         """Set the process ID for a running job."""
         job = self._jobs.get(job_id)
@@ -194,20 +308,53 @@ class JobManager:
 
             return len(to_remove)
 
+    async def remove_jobs_by_status(self, statuses: set[JobStatus]) -> int:
+        """Remove terminal jobs matching the given statuses."""
+        async with self._lock:
+            to_remove = [
+                job_id
+                for job_id, job in self._jobs.items()
+                if job.is_terminal() and job.status in statuses
+            ]
+
+            for job_id in to_remove:
+                del self._jobs[job_id]
+                job_file = self._job_file_path(job_id)
+                if job_file.exists():
+                    job_file.unlink()
+                logger.info(f"Removed terminal job {job_id}")
+
+            self._sync_current_job_unlocked()
+            return len(to_remove)
+
     async def get_next_pending_job(self) -> Job | None:
         """Get the next pending job from queue (FIFO by created_at)."""
+        jobs = await self.get_next_pending_jobs(1)
+        return jobs[0] if jobs else None
+
+    async def get_next_pending_jobs(self, limit: int = 1) -> list[Job]:
+        """Get the next pending jobs from queue (FIFO by created_at)."""
         pending = [j for j in self._jobs.values() if j.status == JobStatus.PENDING]
-        if pending:
-            return sorted(pending, key=lambda j: j.created_at)[0]
-        return None
+        if not pending or limit <= 0:
+            return []
+        return sorted(pending, key=lambda j: j.created_at)[:limit]
 
     async def has_pending_jobs(self) -> bool:
         """Check if there are pending jobs in queue."""
         return any(j.status == JobStatus.PENDING for j in self._jobs.values())
 
+    async def has_unfinished_jobs(self) -> bool:
+        """Check if any job is still queued or running."""
+        return any(j.status in (JobStatus.PENDING, JobStatus.RUNNING) for j in self._jobs.values())
+
+    async def get_latest_job(self) -> Job | None:
+        """Return the most recently created job, if any."""
+        jobs = await self.list_jobs(limit=1)
+        return jobs[0] if jobs else None
+
     async def count_batch_jobs(self, batch_id: str) -> dict:
         """Count jobs in a batch by status."""
-        jobs = [j for j in self._jobs.values() if j.batch_id == batch_id]
+        jobs = await self.get_batch_jobs(batch_id)
         return {
             "total": len(jobs),
             "pending": sum(1 for j in jobs if j.status == JobStatus.PENDING),
@@ -216,6 +363,11 @@ class JobManager:
             "failed": sum(1 for j in jobs if j.status == JobStatus.FAILED),
             "cancelled": sum(1 for j in jobs if j.status == JobStatus.CANCELLED),
         }
+
+    async def get_batch_jobs(self, batch_id: str) -> list[Job]:
+        """Get all jobs in a batch in creation order."""
+        jobs = [j for j in self._jobs.values() if j.batch_id == batch_id]
+        return sorted(jobs, key=lambda j: j.created_at)
 
     async def create_job_with_batch(self, config: RenderJobConfig, batch_id: str | None = None) -> Job:
         """Create a new render job with optional batch ID."""
@@ -227,6 +379,7 @@ class JobManager:
                 config=config,
                 created_at=datetime.now(UTC),
                 batch_id=batch_id,
+                session_files=self._snapshot_session_files(config),
             )
 
             self._jobs[job.id] = job
@@ -252,10 +405,22 @@ class JobManager:
 
     async def get_running_batch_job(self, batch_id: str) -> Job | None:
         """Get the running job in a batch, if any."""
-        for job in self._jobs.values():
-            if job.batch_id == batch_id and job.status == JobStatus.RUNNING:
-                return job
-        return None
+        jobs = await self.get_running_batch_jobs(batch_id)
+        return jobs[0] if jobs else None
+
+    async def get_running_batch_jobs(self, batch_id: str) -> list[Job]:
+        """Get all running jobs in a batch."""
+        jobs = [job for job in self._jobs.values() if job.batch_id == batch_id and job.status == JobStatus.RUNNING]
+        return sorted(jobs, key=lambda j: j.started_at or j.created_at)
+
+    @staticmethod
+    def _has_restorable_local_session(job: Job) -> bool:
+        """Return whether a local job has persisted file data that can recreate its session."""
+        if not job.config.session_id.startswith("local:") or not job.session_files:
+            return False
+
+        primary = next((file for file in job.session_files if file.role == FileRole.PRIMARY), None)
+        return bool(primary and Path(primary.file_path).exists())
 
     async def cleanup_orphaned_pending_jobs(self, valid_session_ids: set) -> int:
         """Mark pending jobs as failed if their session no longer exists.
@@ -270,6 +435,12 @@ class JobManager:
         async with self._lock:
             for job in self._jobs.values():
                 if job.status == JobStatus.PENDING and job.config.session_id not in valid_session_ids:
+                    if self._has_restorable_local_session(job):
+                        logger.info(
+                            "Preserving pending job %s with restorable local session snapshot",
+                            job.id,
+                        )
+                        continue
                     job.status = JobStatus.FAILED
                     job.error = "Session no longer exists (orphaned job)"
                     job.completed_at = datetime.now(UTC)

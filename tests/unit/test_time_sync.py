@@ -104,6 +104,47 @@ class TestAnalyzeSyncTzCorrection:
         assert result.source == "mtime"
         assert result.tz_correction_hours is None
 
+    def test_dji_filename_source(self):
+        """When DJI filename start time is selected, source='dji-filename'."""
+        wrong_ct = datetime.datetime(2026, 5, 10, 6, 15, 33, tzinfo=datetime.UTC)
+        dji_result = CorrectionResult(
+            time=datetime.datetime(2026, 5, 10, 14, 3, 46, tzinfo=datetime.UTC),
+            correction_type="dji-filename",
+        )
+
+        with (
+            self._mock_video_duration(),
+            self._mock_extract_creation_time(wrong_ct),
+            self._mock_validate_creation_time(dji_result),
+            self._mock_gps_range(),
+            self._mock_calculate_overlap(),
+        ):
+            result = _analyze_sync(Path("/tmp/DJI_20260510140346_0055_D.MP4"), 0, Path("/tmp/track.gpx"))
+
+        assert result.source == "dji-filename"
+        assert result.video_start == dji_result.time.isoformat()
+        assert result.correction_reason is not None
+        assert "dji filename" in result.correction_reason.lower()
+
+    def test_dji_filename_source_preempts_creation_time(self):
+        """Time sync analysis should report DJI filename before stale MP4 creation_time."""
+        creation_time = datetime.datetime(2026, 5, 5, 9, 26, 47, tzinfo=datetime.UTC)
+        dji_start = datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+
+        with (
+            self._mock_video_duration(),
+            self._mock_extract_creation_time(creation_time),
+            patch("gpstitch.api.time_sync._resolve_dji_filename_start_time", return_value=dji_start),
+            patch("gpstitch.api.time_sync._validate_creation_time") as mock_validate,
+            self._mock_gps_range(),
+            self._mock_calculate_overlap(),
+        ):
+            result = _analyze_sync(Path("/tmp/DJI_20260505091523_0004_D.MP4"), 0, Path("/tmp/track.gpx"))
+
+        assert result.source == "dji-filename"
+        assert result.video_start == dji_start.isoformat()
+        mock_validate.assert_not_called()
+
     def test_no_correction_source_media_created(self):
         """When creation_time is unchanged (GoPro), source='media-created'."""
         correct_ct = datetime.datetime(2026, 2, 6, 19, 34, 47, tzinfo=datetime.UTC)
@@ -137,6 +178,22 @@ class TestAnalyzeSyncTzCorrection:
 
         assert result.source == "file-created"
         assert result.tz_correction_hours is None
+
+    def test_no_creation_time_dji_filename_source(self):
+        """When DJI filename matches GPS and creation_time is absent, source='dji-filename'."""
+        dji_start = datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+
+        with (
+            self._mock_video_duration(),
+            self._mock_extract_creation_time(None),
+            self._mock_gps_range(),
+            self._mock_calculate_overlap(),
+            patch("gpstitch.api.time_sync._resolve_dji_filename_start_time", return_value=dji_start),
+        ):
+            result = _analyze_sync(Path("/tmp/DJI_20260505091523_0004_D.MP4"), 0, Path("/tmp/track.gpx"))
+
+        assert result.source == "dji-filename"
+        assert result.video_start == dji_start.isoformat()
 
     def test_system_tz_source_and_correction_reason(self):
         """When correction_type='system-tz', source='system-tz', correction_reason mentions system timezone."""

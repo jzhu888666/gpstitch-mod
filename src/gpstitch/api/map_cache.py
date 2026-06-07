@@ -42,6 +42,7 @@ async def get_amap_context(request: AMapRenderContextRequest) -> AMapRenderConte
         layout=request.layout,
         frame_time_ms=request.frame_time_ms,
         language=request.language,
+        map_style=request.map_style,
     )
 
 

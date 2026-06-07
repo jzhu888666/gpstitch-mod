@@ -233,6 +233,12 @@ class RenderModal {
             const data = await response.json();
             this.jobId = data.job_id;
             this.outputPathEl.textContent = data.output_file;
+            document.dispatchEvent(new CustomEvent('render-queue:changed', {
+                detail: {
+                    source: 'single',
+                    jobId: this.jobId,
+                }
+            }));
 
             this.open();
 

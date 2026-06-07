@@ -35,7 +35,9 @@ TS_SRT_SOURCE_ARG = "--ts-srt-source"
 TS_SRT_VIDEO_ARG = "--ts-srt-video"
 TS_ODO_OFFSET_ARG = "--ts-odo-offset"
 TS_DJI_META_SOURCE_ARG = "--ts-dji-meta-source"
+TS_GPX_TIME_SHIFT_ARG = "--ts-gpx-time-shift-seconds"
 TS_AMAP_RENDER_ARG = "--ts-amap-render"
+TS_AMAP_MAP_STYLE_ARG = "--ts-amap-map-style"
 
 
 def find_gopro_dashboard() -> Path | None:
@@ -80,7 +82,15 @@ def _extract_custom_args() -> dict:
     Returns:
         Dict with keys: srt_path, video_path, odo_offset. Values may be None.
     """
-    result = {"srt_path": None, "video_path": None, "odo_offset": None, "dji_meta_source": None, "amap_render": False}
+    result = {
+        "srt_path": None,
+        "video_path": None,
+        "odo_offset": None,
+        "dji_meta_source": None,
+        "gpx_time_shift_seconds": 0,
+        "amap_render": False,
+        "amap_map_style": None,
+    }
     new_argv = []
     i = 0
     while i < len(sys.argv):
@@ -101,9 +111,19 @@ def _extract_custom_args() -> dict:
         elif arg == TS_DJI_META_SOURCE_ARG and i + 1 < len(sys.argv):
             result["dji_meta_source"] = sys.argv[i + 1]
             i += 2
+        elif arg == TS_GPX_TIME_SHIFT_ARG and i + 1 < len(sys.argv):
+            try:
+                result["gpx_time_shift_seconds"] = int(float(sys.argv[i + 1]))
+            except ValueError:
+                logger.error("Invalid %s value: %s (expected seconds)", TS_GPX_TIME_SHIFT_ARG, sys.argv[i + 1])
+                sys.exit(1)
+            i += 2
         elif arg == TS_AMAP_RENDER_ARG:
             result["amap_render"] = True
             i += 1
+        elif arg == TS_AMAP_MAP_STYLE_ARG and i + 1 < len(sys.argv):
+            result["amap_map_style"] = sys.argv[i + 1]
+            i += 2
         else:
             new_argv.append(arg)
             i += 1
@@ -137,6 +157,14 @@ def main():
         patch_dji_meta_load(custom_args["dji_meta_source"])
         logger.info(f"DJI meta GPX patch applied: source={custom_args['dji_meta_source']}")
 
+    # Patch plain GPX loading when the source file stores local wall-clock
+    # timestamps with a UTC marker.
+    if custom_args["gpx_time_shift_seconds"]:
+        from gpstitch.patches.gpx_patches import patch_gpx_time_shift
+
+        patch_gpx_time_shift(custom_args["gpx_time_shift_seconds"])
+        logger.info("GPX time shift patch applied: %+ds", custom_args["gpx_time_shift_seconds"])
+
     # Patch calculate_odo to start from offset (for shared GPX batch render)
     if custom_args["odo_offset"] is not None:
         from gpstitch.patches.odo_patches import patch_calculate_odo
@@ -148,8 +176,8 @@ def main():
     if custom_args["amap_render"]:
         from gpstitch.patches.amap_render_patches import patch_amap_jsapi_rendering
 
-        patch_amap_jsapi_rendering()
-        logger.info("AMap JSAPI render patch applied")
+        patch_amap_jsapi_rendering(custom_args["amap_map_style"])
+        logger.info("AMap JSAPI render patch applied: style=%s", custom_args["amap_map_style"] or "amap-jsapi")
 
     # Find the original gopro-dashboard.py
     dashboard_script = find_gopro_dashboard()

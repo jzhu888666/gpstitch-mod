@@ -10,10 +10,49 @@ Applied conditionally by the wrapper script when --ts-srt-source is present.
 
 import logging
 from dataclasses import replace as dc_replace
-from datetime import UTC
+from datetime import UTC, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _shift_timeseries_datetimes(timeseries, shift_seconds: int):
+    """Return a copy of a Timeseries with every entry dt shifted."""
+    if not shift_seconds:
+        return timeseries
+
+    from gopro_overlay.entry import Entry
+    from gopro_overlay.timeseries import Timeseries
+
+    shift = timedelta(seconds=shift_seconds)
+    shifted = Timeseries()
+    shifted.add(*(Entry(entry.dt + shift, **entry.items) for entry in timeseries.items()))
+    return shifted
+
+
+def patch_gpx_time_shift(shift_seconds: int) -> None:
+    """Patch gopro_overlay.loading.load_external to shift external GPX timestamps."""
+    if not shift_seconds:
+        return
+
+    import gopro_overlay.loading as loading_module
+
+    if getattr(loading_module, "_ts_gpx_time_shift_patched", False):
+        logger.debug("load_external already patched for GPX time shift, skipping")
+        return
+
+    original_load_external = loading_module.load_external
+
+    def patched_load_external(filepath: Path, units):
+        timeseries = original_load_external(filepath, units)
+        shifted = _shift_timeseries_datetimes(timeseries, shift_seconds)
+        logger.info("GPX time shift: %s shifted by %+ds", Path(filepath).name, shift_seconds)
+        return shifted
+
+    loading_module.load_external = patched_load_external
+    loading_module._ts_gpx_time_shift_patched = True
+    loading_module._ts_gpx_time_shift_seconds = shift_seconds
+    logger.info("Patched gopro_overlay.loading.load_external for GPX time shift: %+ds", shift_seconds)
 
 
 def patch_gpx_load_for_srt(srt_path: str, video_path: str | None = None) -> None:

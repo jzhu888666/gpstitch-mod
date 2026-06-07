@@ -42,6 +42,10 @@ def _reset_loading_module():
     loading_module.load_external = original_fn
     if hasattr(loading_module, "_ts_srt_patched"):
         delattr(loading_module, "_ts_srt_patched")
+    if hasattr(loading_module, "_ts_gpx_time_shift_patched"):
+        delattr(loading_module, "_ts_gpx_time_shift_patched")
+    if hasattr(loading_module, "_ts_gpx_time_shift_seconds"):
+        delattr(loading_module, "_ts_gpx_time_shift_seconds")
 
 
 class TestPatchGpxLoadForSrt:
@@ -141,3 +145,28 @@ class TestPatchGpxLoadForSrt:
         assert abs((entry.dt - expected_dt).total_seconds()) < 1
         # Camera metrics should still be present
         assert entry.iso is not None
+
+
+def test_patch_gpx_time_shift_shifts_loaded_entry_datetimes(monkeypatch):
+    from datetime import UTC, datetime
+
+    import gopro_overlay.loading as loading_module
+    from gopro_overlay.entry import Entry
+    from gopro_overlay.timeseries import Timeseries
+    from gopro_overlay.units import units
+
+    original_dt = datetime(2026, 5, 9, 16, 11, 5, tzinfo=UTC)
+    original = Timeseries()
+    original.add(Entry(original_dt, point="point", alt=974))
+    monkeypatch.setattr(loading_module, "load_external", lambda filepath, units: original)
+
+    from gpstitch.patches.gpx_patches import patch_gpx_time_shift
+
+    patch_gpx_time_shift(-28800)
+
+    shifted = loading_module.load_external(Path("track.gpx"), units)
+    entry = shifted.items()[0]
+
+    assert entry.dt == datetime(2026, 5, 9, 8, 11, 5, tzinfo=UTC)
+    assert entry.point == "point"
+    assert entry.alt == 974

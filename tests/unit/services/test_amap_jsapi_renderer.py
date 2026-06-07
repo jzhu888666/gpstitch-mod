@@ -56,6 +56,7 @@ def test_render_journey_uses_preconverted_amap_points(monkeypatch, tmp_path):
 
     assert captured["options"]["kind"] == "journey-base"
     assert "current" not in captured["options"]
+    assert captured["options"]["drawRoute"] is False
     assert captured["options"]["drawMarker"] is False
     assert captured["options"]["fitPadding"] == [0, 0, 0, 0]
     assert captured["options"]["route"][0] == pytest.approx(
@@ -89,13 +90,14 @@ def test_render_moving_uses_quantized_base_without_browser_marker(monkeypatch, t
 
     assert captured[0]["kind"] == "moving-base"
     assert captured[0]["size"] == int(math.sqrt((256**2) * 2))
+    assert captured[0]["layerType"] == "standard"
     assert captured[0]["drawMarker"] is False
     assert "current" not in captured[0]
     assert image.size == (256, 256)
     assert _has_blue_marker_near_center(image)
 
 
-def test_render_moving_draws_route_on_cached_base(monkeypatch, tmp_path):
+def test_render_moving_does_not_draw_route_on_cached_base(monkeypatch, tmp_path):
     from gpstitch.services.amap_jsapi_renderer import AMapJSAPISnapshotRenderer, AMapSnapshot
 
     renderer = AMapJSAPISnapshotRenderer(
@@ -125,16 +127,116 @@ def test_render_moving_draws_route_on_cached_base(monkeypatch, tmp_path):
         ],
         size=256,
         zoom=17,
-        line_fill=(0, 255, 0),
-        line_width=4,
     )
 
     assert captured[0]["route"] == []
-    assert _has_green_route_pixel(image)
+    assert not _has_green_route_pixel(image)
 
 
-def test_render_journey_rotation_uses_backing_map_and_centers_marker(monkeypatch, tmp_path):
+def test_render_moving_rotation_is_passed_to_amap(monkeypatch, tmp_path):
     from gpstitch.services.amap_jsapi_renderer import AMapJSAPISnapshotRenderer, AMapSnapshot
+
+    renderer = AMapJSAPISnapshotRenderer(
+        SimpleNamespace(
+            configured=True,
+            validated=True,
+            key="test-key",
+            security_js_code="test-security",
+            key_fingerprint="test-fp",
+        ),
+        cache_dir=tmp_path,
+    )
+    captured = []
+
+    def fake_render(options):
+        captured.append(options)
+        return AMapSnapshot(Image.new("RGBA", (options["size"], options["size"]), (255, 255, 255, 255)), {})
+
+    def fail_rotate(*_args, **_kwargs):
+        raise AssertionError("AMap snapshots should not be rotated with PIL")
+
+    monkeypatch.setattr(renderer, "_render_cached_snapshot", fake_render)
+    monkeypatch.setattr(Image.Image, "rotate", fail_rotate)
+
+    image = renderer.render_moving(
+        lat=29.698164997988393,
+        lon=92.22652316093446,
+        size=256,
+        zoom=17,
+        rotation_degrees=90,
+    )
+
+    assert captured[0]["rotation"] == 270
+    assert image.size == (256, 256)
+    assert _has_blue_marker_near_center(image)
+
+
+def test_render_moving_satellite_style_uses_satellite_roadnet_layer(monkeypatch, tmp_path):
+    from gpstitch.services.amap_jsapi_renderer import AMapJSAPISnapshotRenderer, AMapSnapshot
+
+    renderer = AMapJSAPISnapshotRenderer(
+        SimpleNamespace(
+            configured=True,
+            validated=True,
+            key="test-key",
+            security_js_code="test-security",
+            key_fingerprint="test-fp",
+        ),
+        cache_dir=tmp_path,
+        map_style="amap-jsapi-satellite",
+    )
+    captured = []
+
+    def fake_render(options):
+        captured.append(options)
+        return AMapSnapshot(Image.new("RGBA", (options["size"], options["size"]), (255, 255, 255, 255)), {})
+
+    monkeypatch.setattr(renderer, "_render_cached_snapshot", fake_render)
+
+    renderer.render_moving(lat=29.698164997988393, lon=92.22652316093446, size=256, zoom=17)
+
+    assert captured[0]["layerType"] == "satellite-roadnet"
+
+
+def test_render_mixed_style_uses_standard_moving_and_satellite_journey(monkeypatch, tmp_path):
+    from gpstitch.services.amap_jsapi_renderer import AMapJSAPISnapshotRenderer, AMapSnapshot
+
+    renderer = AMapJSAPISnapshotRenderer(
+        SimpleNamespace(
+            configured=True,
+            validated=True,
+            key="test-key",
+            security_js_code="test-security",
+            key_fingerprint="test-fp",
+        ),
+        cache_dir=tmp_path,
+        map_style="amap-jsapi-mixed",
+    )
+    captured = []
+
+    def fake_render(options):
+        captured.append(options)
+        return AMapSnapshot(Image.new("RGBA", (options["size"], options["size"]), (255, 255, 255, 255)), {})
+
+    monkeypatch.setattr(renderer, "_render_cached_snapshot", fake_render)
+
+    renderer.render_moving(lat=29.698164997988393, lon=92.22652316093446, size=256, zoom=17)
+    renderer.render_journey(
+        route=[(29.698164997988393, 92.22652316093446), (29.698264997988394, 92.22662316093445)],
+        current=(29.698164997988393, 92.22652316093446),
+        size=256,
+    )
+
+    assert [options["layerType"] for options in captured] == ["standard", "satellite-roadnet"]
+
+
+def test_render_journey_rotation_uses_amap_rotation_and_centers_marker(monkeypatch, tmp_path):
+    from gpstitch.services.amap_jsapi_renderer import (
+        AMapJSAPISnapshotRenderer,
+        AMapSnapshot,
+        _journey_rotation_backing_size,
+        _rotation_safe_padding,
+    )
 
     renderer = AMapJSAPISnapshotRenderer(
         SimpleNamespace(
@@ -155,7 +257,11 @@ def test_render_journey_rotation_uses_backing_map_and_centers_marker(monkeypatch
             "zoom": 16,
         })
 
+    def fail_rotate(*_args, **_kwargs):
+        raise AssertionError("AMap snapshots should not be rotated with PIL")
+
     monkeypatch.setattr(renderer, "_render_cached_snapshot", fake_render)
+    monkeypatch.setattr(Image.Image, "rotate", fail_rotate)
 
     image = renderer.render_journey(
         route=[
@@ -167,7 +273,10 @@ def test_render_journey_rotation_uses_backing_map_and_centers_marker(monkeypatch
         rotation_degrees=90,
     )
 
-    assert captured["options"]["size"] == int(math.sqrt((256**2) * 2))
+    assert captured["options"]["size"] == _journey_rotation_backing_size(256)
+    assert captured["options"]["rotation"] == 270
+    assert captured["options"]["fitPadding"] == [_rotation_safe_padding(256)] * 4
+    assert captured["options"]["drawRoute"] is False
     assert image.size == (256, 256)
     assert image.getpixel((128, 128))[:3] == (0, 0, 255)
 
@@ -181,6 +290,13 @@ def test_renderer_html_hides_amap_attribution():
     assert ".amap-copyright" in html
     assert "display: none !important" in html
     assert "map.setFitView(overlays, false, fitPadding)" in html
+    assert "viewMode: '3D'" in html
+    assert "pitch: 0" in html
+    assert "pitchEnable: false" in html
+    assert "new AMap.TileLayer.Satellite" in html
+    assert "new AMap.TileLayer.RoadNet" in html
+    assert "rotation: mapRotation === null ? 0 : mapRotation" in html
+    assert "map.setRotation(rotation)" in html
 
 
 def test_close_moving_points_share_quantized_center():

@@ -209,16 +209,17 @@ class GpxOptionsPanel {
 
             // Use source-specific label: for mtime/file-created, baseDate is NOT the
             // original creation_time — it's the file modification/creation time.
-            const baseLabel = info.source === 'mtime' ? 'File-derived start:'
-                : info.source === 'file-created' ? 'File creation time:'
-                : 'Original creation_time:';
+            const baseLabel = info.source === 'mtime' ? 'File start (local):'
+                : info.source === 'dji-filename' ? 'DJI start (local):'
+                : info.source === 'file-created' ? 'File ctime (local):'
+                : 'Original time (local):';
             addRow(baseLabel, this._formatDateTime(baseDate));
-            addRow('Corrected video start:', this._formatDateTime(adjustedDate));
+            addRow('Corrected start (local):', this._formatDateTime(adjustedDate));
 
             if (info.gps_start && info.gps_end) {
-                const gpsStartFmt = this._formatDateTime(new Date(info.gps_start));
-                const gpsEndFmt = this._formatTime(new Date(info.gps_end));
-                addRow('GPS range:', `${gpsStartFmt} — ${gpsEndFmt}`);
+                const gpsStart = new Date(info.gps_start);
+                const gpsEnd = new Date(info.gps_end);
+                addRow('GPS range (local):', this._formatDateTimeRange(gpsStart, gpsEnd));
             }
 
             if (info.overlap && info.overlap.points > 0) {
@@ -244,8 +245,8 @@ class GpxOptionsPanel {
 
         const startDate = new Date(info.video_start);
         const endDate = new Date(startDate.getTime() + info.video_duration_sec * 1000);
+        const rangeFmt = this._formatDateTimeRange(startDate, endDate);
         const startFmt = this._formatDateTime(startDate);
-        const endFmt = this._formatTime(endDate);
 
         switch (info.source) {
             case 'system-tz': {
@@ -287,7 +288,18 @@ class GpxOptionsPanel {
             }
 
             case 'mtime': {
-                this.timeSyncHint.textContent = `[!] ${startFmt}-${endFmt} (using file date)`;
+                this.timeSyncHint.textContent = `[!] ${rangeFmt} (using file date, local)`;
+                this.timeSyncHint.className = 'time-sync-hint time-sync-warning';
+                break;
+            }
+
+            case 'dji-filename': {
+                let text = `[!] ${rangeFmt} (DJI filename start, local)`;
+                if (info.overlap) {
+                    const speed = info.overlap.avg_speed_kph?.toFixed(1) || '0.0';
+                    text += ` | ${info.overlap.points} pts | ${speed} km/h`;
+                }
+                this.timeSyncHint.textContent = text;
                 this.timeSyncHint.className = 'time-sync-hint time-sync-warning';
                 break;
             }
@@ -296,9 +308,7 @@ class GpxOptionsPanel {
                 const ctFmt = startFmt;
                 let gpsInfo = '';
                 if (info.gps_start && info.gps_end) {
-                    const gpsStartFmt = this._formatDateTime(new Date(info.gps_start));
-                    const gpsEndFmt = this._formatTime(new Date(info.gps_end));
-                    gpsInfo = ` | GPS: ${gpsStartFmt}-${gpsEndFmt}`;
+                    gpsInfo = ` | GPS: ${this._formatDateTimeRange(new Date(info.gps_start), new Date(info.gps_end))}`;
                 }
                 const mainSpan = document.createElement('span');
                 mainSpan.textContent = `[\u26A0] Couldn't auto-align time | Video: ${ctFmt}${gpsInfo}`;
@@ -316,9 +326,9 @@ class GpxOptionsPanel {
             case 'file-created': {
                 if (info.overlap) {
                     const speed = info.overlap.avg_speed_kph?.toFixed(1) || '0.0';
-                    this.timeSyncHint.textContent = `[!] ${startFmt}-${endFmt} (file date) | ${info.overlap.points} pts | ${speed} km/h`;
+                    this.timeSyncHint.textContent = `[!] ${rangeFmt} (file date, local) | ${info.overlap.points} pts | ${speed} km/h`;
                 } else {
-                    this.timeSyncHint.textContent = `[!] ${startFmt} (file date, may be inaccurate)`;
+                    this.timeSyncHint.textContent = `[!] ${startFmt} (file date, local, may be inaccurate)`;
                 }
                 this.timeSyncHint.className = 'time-sync-hint time-sync-warning';
                 break;
@@ -328,10 +338,10 @@ class GpxOptionsPanel {
             default: {
                 if (info.overlap) {
                     const speed = info.overlap.avg_speed_kph?.toFixed(1) || '0.0';
-                    this.timeSyncHint.textContent = `${startFmt}-${endFmt} | ${info.overlap.points} pts | ${speed} km/h`;
+                    this.timeSyncHint.textContent = `${rangeFmt} | ${info.overlap.points} pts | ${speed} km/h`;
                     this.timeSyncHint.className = 'time-sync-hint';
                 } else {
-                    this.timeSyncHint.textContent = `[!] ${startFmt}-${endFmt} | No GPS data found`;
+                    this.timeSyncHint.textContent = `[!] ${rangeFmt} | No GPS data found`;
                     this.timeSyncHint.className = 'time-sync-hint time-sync-warning';
                 }
                 break;
@@ -364,11 +374,24 @@ class GpxOptionsPanel {
 
     _formatDateTime(date) {
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        return `${months[date.getUTCMonth()]} ${date.getUTCDate()}, ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}:${String(date.getUTCSeconds()).padStart(2, '0')}`;
+        return `${months[date.getMonth()]} ${date.getDate()}, ${this._formatTime(date)}`;
     }
 
     _formatTime(date) {
-        return `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}:${String(date.getUTCSeconds()).padStart(2, '0')}`;
+        return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+    }
+
+    _formatDateTimeRange(startDate, endDate) {
+        if (this._isSameLocalDate(startDate, endDate)) {
+            return `${this._formatDateTime(startDate)}-${this._formatTime(endDate)}`;
+        }
+        return `${this._formatDateTime(startDate)}-${this._formatDateTime(endDate)}`;
+    }
+
+    _isSameLocalDate(a, b) {
+        return a.getFullYear() === b.getFullYear()
+            && a.getMonth() === b.getMonth()
+            && a.getDate() === b.getDate();
     }
 
     _updateVisibility() {

@@ -8,8 +8,11 @@ import pytest
 from PIL import Image
 
 from gpstitch.services.renderer import (
+    _detect_gpx_time_shift_seconds,
+    _extract_dji_filename_start_time,
     _fit_video_to_canvas,
     _get_gps_time_range,
+    _resolve_dji_filename_start_time,
     _resolve_time_alignment,
     _validate_creation_time,
 )
@@ -173,9 +176,11 @@ class TestGenerateCliCommand:
             layout="dji-drone-1920x1080",
             map_style="osm",
             amap_render=True,
+            amap_map_style="amap-jsapi-satellite",
         )
 
         assert "--map-style" not in cmd
+        assert "--ts-amap-map-style amap-jsapi-satellite" in cmd
         assert "--ts-amap-render" in cmd
         assert "dji-drone-1920x1080.xml" in cmd
 
@@ -378,6 +383,29 @@ class TestGenerateCliCommandNewModes:
         assert "--video-time-start" in cmd
         assert "file-modified" in cmd
 
+    def test_manual_mode_adds_gpx_time_shift_when_detected(self, mock_file_manager):
+        """Render wrapper should receive GPX time shift for local-as-UTC GPX files."""
+        from gpstitch.models.schemas import FileRole
+        from gpstitch.services.renderer import generate_cli_command
+
+        primary = self._make_file_info("/tmp/DJI_20260509162215_0080_D.MP4", "video", FileRole.PRIMARY)
+        secondary = self._make_file_info("/tmp/05090802.GPX", "gpx", FileRole.SECONDARY)
+
+        mock_file_manager.get_files.return_value = [primary, secondary]
+        mock_file_manager.get_primary_file.return_value = primary
+        mock_file_manager.get_secondary_file.return_value = secondary
+
+        with patch("gpstitch.services.renderer._resolve_gpx_time_shift_for_command", return_value=-28800):
+            cmd, _ = generate_cli_command(
+                session_id="test-session",
+                output_file="/tmp/output.mp4",
+                layout="default-3840x2160",
+                video_time_alignment="manual",
+                time_offset_seconds=-693,
+            )
+
+        assert "--ts-gpx-time-shift-seconds -28800" in cmd
+
     def test_gpx_timestamps_mode_uses_gpx_merge(self, mock_file_manager):
         """GPX-timestamps mode should use --gpx-merge (no time alignment)."""
         from gpstitch.models.schemas import FileRole
@@ -469,6 +497,28 @@ class TestResolveTimeAlignment:
         assert source == "media-created"
         assert duration is not None
 
+    def test_auto_mode_prefers_dji_filename_over_creation_time(self, mock_ffmpeg_gopro):
+        """Preview/internal alignment should use DJI filename before stale MP4 creation_time."""
+        creation_time = datetime.datetime(2026, 5, 5, 9, 26, 47, tzinfo=datetime.UTC)
+        dji_start = datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+
+        with (
+            patch("gpstitch.services.renderer._resolve_dji_filename_start_time", return_value=dji_start),
+            patch("gpstitch.services.renderer._extract_creation_time", return_value=creation_time),
+            patch("gpstitch.services.renderer._validate_creation_time") as mock_validate,
+        ):
+            start_date, duration, source = _resolve_time_alignment(
+                Path("/tmp/DJI_20260505091523_0004_D.MP4"),
+                "auto",
+                mock_ffmpeg_gopro,
+                gpx_path=Path("/tmp/05050756.GPX"),
+            )
+
+        assert start_date == dji_start
+        assert source == "dji-filename"
+        assert duration is not None
+        mock_validate.assert_not_called()
+
     def test_auto_mode_fallback_to_st_ctime(self, mock_ffmpeg_gopro, file_ctime):
         """Auto mode should fallback to st_ctime when no creation_time in metadata."""
         mock_fstat = MagicMock()
@@ -551,6 +601,49 @@ class TestResolveTimeAlignment:
         assert start_date == creation_time
 
 
+class TestGpxTimeShiftDetection:
+    def test_dji_filename_prefers_local_wall_clock_when_both_ranges_overlap(self):
+        """A long local-as-UTC GPX should use the raw local wall-clock segment."""
+        gps_range = (
+            datetime.datetime(2026, 5, 9, 8, 2, 33, tzinfo=datetime.UTC).timestamp(),
+            datetime.datetime(2026, 5, 9, 16, 19, 18, tzinfo=datetime.UTC).timestamp(),
+        )
+        video_start = datetime.datetime(2026, 5, 9, 8, 11, 5, tzinfo=datetime.UTC)
+
+        with (
+            patch("gpstitch.services.renderer._get_gps_time_range", return_value=gps_range),
+            patch("gpstitch.services.renderer._get_system_tz_offset", return_value=datetime.timedelta(hours=8)),
+        ):
+            shift = _detect_gpx_time_shift_seconds(
+                video_start,
+                300.0,
+                Path("/tmp/05090802.GPX"),
+                source="dji-filename",
+            )
+
+        assert shift == -28800
+
+    def test_media_created_keeps_standard_utc_gpx_when_as_is_also_overlaps(self):
+        gps_range = (
+            datetime.datetime(2026, 5, 9, 8, 2, 33, tzinfo=datetime.UTC).timestamp(),
+            datetime.datetime(2026, 5, 9, 16, 19, 18, tzinfo=datetime.UTC).timestamp(),
+        )
+        video_start = datetime.datetime(2026, 5, 9, 8, 11, 5, tzinfo=datetime.UTC)
+
+        with (
+            patch("gpstitch.services.renderer._get_gps_time_range", return_value=gps_range),
+            patch("gpstitch.services.renderer._get_system_tz_offset", return_value=datetime.timedelta(hours=8)),
+        ):
+            shift = _detect_gpx_time_shift_seconds(
+                video_start,
+                300.0,
+                Path("/tmp/track.gpx"),
+                source="media-created",
+            )
+
+        assert shift == 0
+
+
 class TestGetGpsTimeRange:
     """Tests for _get_gps_time_range — GPS file parsing with error handling."""
 
@@ -581,6 +674,117 @@ class TestValidateCreationTime:
         datetime.datetime(2026, 2, 6, 18, 10, 23, tzinfo=datetime.UTC).timestamp(),
         datetime.datetime(2026, 2, 6, 20, 2, 53, tzinfo=datetime.UTC).timestamp(),
     )
+
+    def test_extract_dji_filename_start_time(self):
+        result = _extract_dji_filename_start_time(Path("/tmp/DJI_20260510140346_0055_D.MP4"))
+
+        assert result == datetime.datetime(2026, 5, 10, 14, 3, 46, tzinfo=datetime.UTC)
+
+    def test_resolve_dji_filename_start_time_when_creation_time_missing(self):
+        gps_range = (
+            datetime.datetime(2026, 5, 5, 7, 56, 20, tzinfo=datetime.UTC).timestamp(),
+            datetime.datetime(2026, 5, 5, 15, 52, 54, tzinfo=datetime.UTC).timestamp(),
+        )
+
+        with (
+            patch("gpstitch.services.renderer._get_gps_time_range", return_value=gps_range),
+            patch("gpstitch.services.renderer._get_system_tz_offset", return_value=datetime.timedelta(hours=8)),
+        ):
+            result = _resolve_dji_filename_start_time(
+                Path("/tmp/DJI_20260505091523_0004_D.MP4"),
+                51.0,
+                Path("/tmp/05050756.GPX"),
+            )
+
+        assert result == datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+
+    def test_resolve_dji_filename_start_time_allows_unknown_duration(self):
+        gps_range = (
+            datetime.datetime(2026, 5, 5, 7, 56, 20, tzinfo=datetime.UTC).timestamp(),
+            datetime.datetime(2026, 5, 5, 15, 52, 54, tzinfo=datetime.UTC).timestamp(),
+        )
+
+        with (
+            patch("gpstitch.services.renderer._get_gps_time_range", return_value=gps_range),
+            patch("gpstitch.services.renderer._get_system_tz_offset", return_value=datetime.timedelta(hours=8)),
+        ):
+            result = _resolve_dji_filename_start_time(
+                Path("/tmp/DJI_20260505091523_0004_D.MP4"),
+                0.0,
+                Path("/tmp/05050756.GPX"),
+            )
+
+        assert result == datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+
+    def test_dji_filename_start_time_wins_when_creation_time_is_recording_end(self):
+        """DJI MP4 creation_time may be recording end, while filename stores the start time."""
+        gps_range = (
+            datetime.datetime(2026, 5, 10, 7, 57, 33, tzinfo=datetime.UTC).timestamp(),
+            datetime.datetime(2026, 5, 10, 14, 11, 5, tzinfo=datetime.UTC).timestamp(),
+        )
+        creation_time_end_utc = datetime.datetime(2026, 5, 10, 6, 15, 33, tzinfo=datetime.UTC)
+        video_duration = 707.0
+
+        with (
+            patch("gpstitch.services.renderer._get_gps_time_range", return_value=gps_range),
+            patch("gpstitch.services.renderer._get_system_tz_offset", return_value=datetime.timedelta(hours=8)),
+            patch("gpstitch.services.renderer.os.stat") as mock_stat,
+        ):
+            mock_stat.return_value.st_mtime = creation_time_end_utc.timestamp()
+            result = _validate_creation_time(
+                Path("/tmp/DJI_20260510140346_0055_D.MP4"),
+                creation_time_end_utc,
+                video_duration,
+                Path("/tmp/05100757.GPX"),
+            )
+
+        assert result.time == datetime.datetime(2026, 5, 10, 14, 3, 46, tzinfo=datetime.UTC)
+        assert result.correction_type == "dji-filename"
+
+    def test_dji_filename_wins_when_creation_time_also_overlaps_long_gpx(self):
+        """All-day GPX ranges can make a wrong DJI creation_time look valid."""
+        gps_range = (
+            datetime.datetime(2026, 5, 5, 7, 56, 20, tzinfo=datetime.UTC).timestamp(),
+            datetime.datetime(2026, 5, 5, 15, 52, 54, tzinfo=datetime.UTC).timestamp(),
+        )
+        creation_time = datetime.datetime(2026, 5, 5, 9, 26, 47, tzinfo=datetime.UTC)
+        video_duration = 51.0
+
+        with (
+            patch("gpstitch.services.renderer._get_gps_time_range", return_value=gps_range),
+            patch("gpstitch.services.renderer._get_system_tz_offset", return_value=datetime.timedelta(hours=8)),
+        ):
+            result = _validate_creation_time(
+                Path("/tmp/DJI_20260505091523_0004_D.MP4"),
+                creation_time,
+                video_duration,
+                Path("/tmp/05050756.GPX"),
+            )
+
+        assert result.time == datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+        assert result.correction_type == "dji-filename"
+
+    def test_dji_filename_wins_when_creation_time_exists_but_duration_unknown(self):
+        """If ffprobe duration fails, DJI filename still prevents accepting stale creation_time."""
+        gps_range = (
+            datetime.datetime(2026, 5, 5, 7, 56, 20, tzinfo=datetime.UTC).timestamp(),
+            datetime.datetime(2026, 5, 5, 15, 52, 54, tzinfo=datetime.UTC).timestamp(),
+        )
+        creation_time = datetime.datetime(2026, 5, 5, 9, 26, 47, tzinfo=datetime.UTC)
+
+        with (
+            patch("gpstitch.services.renderer._get_gps_time_range", return_value=gps_range),
+            patch("gpstitch.services.renderer._get_system_tz_offset", return_value=datetime.timedelta(hours=8)),
+        ):
+            result = _validate_creation_time(
+                Path("/tmp/DJI_20260505091523_0004_D.MP4"),
+                creation_time,
+                0.0,
+                Path("/tmp/05050756.GPX"),
+            )
+
+        assert result.time == datetime.datetime(2026, 5, 5, 9, 15, 23, tzinfo=datetime.UTC)
+        assert result.correction_type == "dji-filename"
 
     def test_creation_time_correct_gopro(self):
         """When creation_time overlaps GPS range (GoPro), keep it as-is."""
@@ -1573,7 +1777,11 @@ class TestLayoutCommandGeneration:
         assert "default-1920x1080.xml" in cmd
         m = re.search(r"--layout-xml\s+(\S+)", cmd)
         assert m, "No --layout-xml path found"
-        assert Path(m.group(1).strip("'\"")).exists(), "layout-xml path must exist on disk"
+        layout_path = Path(m.group(1).strip("'\""))
+        assert layout_path.exists(), "layout-xml path must exist on disk"
+        layout_xml = layout_path.read_text(encoding="utf-8")
+        assert 'timezone="local"' in layout_xml
+        assert 'timezone="source"' not in layout_xml
 
     def test_speed_awareness_layout_uses_layout_flag(self, mock_file_manager):
         """speed-awareness should generate --layout speed-awareness."""
@@ -2113,6 +2321,7 @@ class TestWrapperArgsPreservedInCommandEndpoint:
         assert "--ts-amap-render" in response.command
         assert captured["map_style"] is None
         assert captured["amap_render"] is True
+        assert captured["amap_map_style"] == "amap-jsapi"
 
     def test_command_passed_through_unchanged(self, mock_deps):
         """Command endpoint should pass generate_cli_command output through without modification."""

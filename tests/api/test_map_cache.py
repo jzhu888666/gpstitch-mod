@@ -66,6 +66,59 @@ def test_amap_cache_warmup_writes_only_descriptor_metadata(monkeypatch, temp_dir
     assert not list((temp_dir / "maps" / "amap").glob("*.png"))
 
 
+def test_amap_satellite_cache_warmup_records_map_style(monkeypatch, temp_dir):
+    from gpstitch.services.map_cache import AMapMapWidget, MapCacheService, RoutePoint
+
+    service = MapCacheService(cache_dir=temp_dir / "maps")
+    monkeypatch.setattr(
+        service,
+        "get_session_route_points",
+        lambda session_id: [RoutePoint(lat=30.0, lon=120.0), RoutePoint(lat=30.1, lon=120.1)],
+    )
+    monkeypatch.setattr(
+        service,
+        "get_layout_map_widgets",
+        lambda *args, **kwargs: [
+            AMapMapWidget(name="moving_map", type="moving_map", x=100, y=100, width=256, height=256)
+        ],
+    )
+
+    response = service.warm_session_cache("session", map_style="amap-jsapi-satellite", layout="default-1920x1080")
+
+    descriptor = next((temp_dir / "maps" / "amap" / "descriptors").glob("*.json"))
+    assert response.success is True
+    assert response.provider == "amap"
+    assert response.cache_key
+    assert '"map_style": "amap-jsapi-satellite"' in descriptor.read_text(encoding="utf-8")
+
+
+def test_amap_mixed_cache_warmup_records_map_style(monkeypatch, temp_dir):
+    from gpstitch.services.map_cache import AMapMapWidget, MapCacheService, RoutePoint
+
+    service = MapCacheService(cache_dir=temp_dir / "maps")
+    monkeypatch.setattr(
+        service,
+        "get_session_route_points",
+        lambda session_id: [RoutePoint(lat=30.0, lon=120.0), RoutePoint(lat=30.1, lon=120.1)],
+    )
+    monkeypatch.setattr(
+        service,
+        "get_layout_map_widgets",
+        lambda *args, **kwargs: [
+            AMapMapWidget(name="moving_map", type="moving_map", x=100, y=100, width=256, height=256),
+            AMapMapWidget(name="journey_map", type="journey_map", x=100, y=400, width=256, height=256),
+        ],
+    )
+
+    response = service.warm_session_cache("session", map_style="amap-jsapi-mixed", layout="default-1920x1080")
+
+    descriptor = next((temp_dir / "maps" / "amap" / "descriptors").glob("*.json"))
+    assert response.success is True
+    assert response.provider == "amap"
+    assert response.cache_key
+    assert '"map_style": "amap-jsapi-mixed"' in descriptor.read_text(encoding="utf-8")
+
+
 def test_layout_map_widgets_finds_two_default_drone_maps(temp_dir):
     from gpstitch.services.map_cache import MapCacheService
 

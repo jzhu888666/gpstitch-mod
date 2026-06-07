@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 logger = logging.getLogger(__name__)
 
 
-def patch_amap_jsapi_rendering() -> None:
+def patch_amap_jsapi_rendering(map_style: str | None = None) -> None:
     """Replace gopro_overlay XML map widget factories with AMap-backed widgets."""
     import gopro_overlay.layout_xml as layout_xml_module
 
@@ -25,7 +25,7 @@ def patch_amap_jsapi_rendering() -> None:
     from gpstitch.services.amap_settings import amap_settings_service
 
     runtime_config = amap_settings_service.get_runtime_config()
-    renderer = AMapJSAPISnapshotRenderer(runtime_config)
+    renderer = AMapJSAPISnapshotRenderer(runtime_config, map_style=map_style)
 
     class AMapMovingMapWidget(Widget):
         def __init__(
@@ -74,8 +74,6 @@ def patch_amap_jsapi_rendering() -> None:
                 size=self.size,
                 zoom=self.zoom,
                 rotation_degrees=rotation_degrees,
-                line_fill=self.line_fill,
-                line_width=self.line_width,
                 marker_fill=self.marker_fill,
                 marker_outline=self.marker_outline,
             )
@@ -104,6 +102,7 @@ def patch_amap_jsapi_rendering() -> None:
             line_width: int,
             marker_fill: tuple[int, int, int],
             marker_outline: tuple[int, int, int],
+            widget_type: str,
         ) -> None:
             self.at = at
             self.location = location
@@ -116,6 +115,7 @@ def patch_amap_jsapi_rendering() -> None:
             self.line_width = line_width
             self.marker_fill = marker_fill
             self.marker_outline = marker_outline
+            self.widget_type = widget_type
             self.border = MaybeRoundedBorder(size=size, corner_radius=corner_radius, opacity=opacity)
             self._route: list[tuple[float, float]] | None = None
 
@@ -136,6 +136,7 @@ def patch_amap_jsapi_rendering() -> None:
                 line_width=self.line_width,
                 marker_fill=self.marker_fill,
                 marker_outline=self.marker_outline,
+                widget_type=self.widget_type,
             )
             image.alpha_composite(self.border.rounded(frame), self.at.tuple())
 
@@ -182,6 +183,7 @@ def patch_amap_jsapi_rendering() -> None:
             line_width=layout_xml_module.iattrib(element, "line-width", d=5),
             marker_fill=layout_xml_module.rgbattr(element, "loc-fill", d=(0, 0, 255)),
             marker_outline=layout_xml_module.rgbattr(element, "loc-outline", d=(0, 0, 0)),
+            widget_type="journey_map",
         )
 
     def create_moving_journey_map(self, element, entry, **kwargs):
@@ -199,6 +201,7 @@ def patch_amap_jsapi_rendering() -> None:
             line_width=layout_xml_module.iattrib(element, "line-width", d=5),
             marker_fill=layout_xml_module.rgbattr(element, "loc-fill", d=(0, 0, 255)),
             marker_outline=layout_xml_module.rgbattr(element, "loc-outline", d=(0, 0, 0)),
+            widget_type="moving_journey_map",
         )
 
     layout_xml_module.Widgets._gpstitch_original_create_moving_map = original_create_moving_map

@@ -70,6 +70,13 @@ class FileManager:
         """Check if session is a local file reference."""
         return session_id.startswith(self.LOCAL_SESSION_PREFIX)
 
+    def restore_local_session(self, session_id: str, files: list[FileInfo]) -> None:
+        """Restore a local file-reference session from persisted job metadata."""
+        if not self.is_local_session(session_id):
+            raise ValueError("Can only restore local sessions")
+        self._local_sessions[session_id] = list(files)
+        self._current_session = session_id
+
     def add_file(
         self,
         session_id: str,

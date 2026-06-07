@@ -15,14 +15,45 @@ from gpstitch.config import settings
 from gpstitch.models.schemas import AMapRuntimeConfigResponse, AMapSettingsResponse
 
 AMAP_MAP_STYLE = "amap-jsapi"
+AMAP_SATELLITE_MAP_STYLE = "amap-jsapi-satellite"
+AMAP_MIXED_MAP_STYLE = "amap-jsapi-mixed"
+AMAP_MAP_STYLES = frozenset({AMAP_MAP_STYLE, AMAP_SATELLITE_MAP_STYLE, AMAP_MIXED_MAP_STYLE, "amap"})
 AMAP_PROVIDER = "amap"
 AMAP_JSAPI_VERSION = "2.0"
 AMAP_FALLBACK_STYLE = "osm"
+AMAP_STANDARD_LAYER = "standard"
+AMAP_SATELLITE_ROADNET_LAYER = "satellite-roadnet"
+AMAP_JOURNEY_WIDGET_TYPES = frozenset({"journey_map", "moving_journey_map"})
 
 
 def is_amap_style(map_style: str | None) -> bool:
     """Return true when a map style is backed by AMap JSAPI."""
-    return (map_style or "").lower() in {AMAP_MAP_STYLE, "amap"}
+    return (map_style or "").lower() in AMAP_MAP_STYLES
+
+
+def normalize_amap_style(map_style: str | None) -> str:
+    """Return a supported AMap style id."""
+    style = (map_style or "").lower()
+    if style == AMAP_SATELLITE_MAP_STYLE:
+        return AMAP_SATELLITE_MAP_STYLE
+    if style == AMAP_MIXED_MAP_STYLE:
+        return AMAP_MIXED_MAP_STYLE
+    return AMAP_MAP_STYLE
+
+
+def amap_layer_type(map_style: str | None) -> str:
+    """Return the browser layer type for an AMap style id."""
+    if normalize_amap_style(map_style) == AMAP_SATELLITE_MAP_STYLE:
+        return AMAP_SATELLITE_ROADNET_LAYER
+    return AMAP_STANDARD_LAYER
+
+
+def amap_layer_type_for_widget(map_style: str | None, widget_type: str | None = None) -> str:
+    """Return the AMap layer type for a specific map widget."""
+    normalized = normalize_amap_style(map_style)
+    if normalized == AMAP_MIXED_MAP_STYLE:
+        return AMAP_SATELLITE_ROADNET_LAYER if widget_type in AMAP_JOURNEY_WIDGET_TYPES else AMAP_STANDARD_LAYER
+    return amap_layer_type(normalized)
 
 
 def backend_map_style(map_style: str | None) -> str | None:

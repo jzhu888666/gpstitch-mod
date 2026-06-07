@@ -18,6 +18,7 @@ from gpstitch.services.amap_settings import (
     AMAP_PROVIDER,
     amap_settings_service,
     is_amap_style,
+    normalize_amap_style,
 )
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.localization import t
@@ -80,12 +81,14 @@ class MapCacheService:
         the actual map widget sizes from the selected layout.
         """
         if is_amap_style(map_style):
+            amap_style = normalize_amap_style(map_style)
             points = self.get_session_route_points(session_id)
             cache_key = self._write_amap_descriptor(
                 session_id=session_id,
                 points=points,
                 widgets=self.get_layout_map_widgets(layout, layout_xml_path, language),
                 layout=layout,
+                map_style=amap_style,
             )
             return MapCacheWarmupResponse(
                 success=True,
@@ -187,24 +190,28 @@ class MapCacheService:
         layout: str | None = None,
         frame_time_ms: int = 0,
         language: str | None = None,
+        map_style: str | None = None,
     ) -> AMapRenderContextResponse:
         """Build browser-side AMap overlay context for the selected layout."""
         points = self.get_session_route_points(session_id)
         widgets = self.get_layout_map_widgets(layout, language=language)
         canvas_width, canvas_height = _layout_canvas_size(layout)
         sampled_points = _sample_points(points, settings.map_cache_warmup_max_tiles)
+        amap_style = normalize_amap_style(map_style)
         cache_key = self._write_amap_descriptor(
             session_id=session_id,
             points=sampled_points,
             widgets=widgets,
             layout=layout,
             frame_time_ms=frame_time_ms,
+            map_style=amap_style,
         )
         return AMapRenderContextResponse(
             success=True,
             provider=AMAP_PROVIDER,
             canvas_width=canvas_width,
             canvas_height=canvas_height,
+            map_style=amap_style,
             route_points=[AMapRoutePoint(lat=p.lat, lon=p.lon) for p in sampled_points],
             map_widgets=widgets,
             cache_key=cache_key,
@@ -244,6 +251,7 @@ class MapCacheService:
         widgets: list[AMapMapWidget],
         layout: str | None,
         frame_time_ms: int = 0,
+        map_style: str | None = None,
     ) -> str:
         cache_key = _amap_cache_key(
             session_id=session_id,
@@ -251,6 +259,7 @@ class MapCacheService:
             widgets=widgets,
             layout=layout,
             frame_time_ms=frame_time_ms,
+            map_style=map_style,
         )
         target_dir = self._amap_cache_dir() / "descriptors"
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -260,6 +269,7 @@ class MapCacheService:
             "session_id": session_id,
             "layout": layout,
             "frame_time_ms": frame_time_ms,
+            "map_style": map_style or "amap-jsapi",
             "route_hash": _route_hash(points),
             "credential_fingerprint": amap_settings_service.cache_fingerprint(),
             "widgets": [w.model_dump() for w in widgets],
@@ -483,6 +493,7 @@ def _amap_cache_key(
     widgets: list[AMapMapWidget],
     layout: str | None,
     frame_time_ms: int,
+    map_style: str | None = None,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(AMAP_PROVIDER.encode("ascii"))
@@ -490,6 +501,7 @@ def _amap_cache_key(
     digest.update(amap_settings_service.cache_fingerprint().encode("ascii"))
     digest.update(session_id.encode("utf-8"))
     digest.update(str(layout or "").encode("utf-8"))
+    digest.update(str(map_style or "amap-jsapi").encode("utf-8"))
     digest.update(str(frame_time_ms).encode("ascii"))
     digest.update(_route_hash(points).encode("ascii"))
     for widget in widgets:

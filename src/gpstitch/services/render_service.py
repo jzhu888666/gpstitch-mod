@@ -8,13 +8,16 @@ import re
 import shlex
 import signal
 import sys
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 
 from gpstitch.config import settings
 from gpstitch.models.job import JobStatus, RenderJobConfig
+from gpstitch.models.schemas import FileInfo, FileRole
 from gpstitch.services.job_manager import job_manager
+from gpstitch.services.power import power_service
 from gpstitch.services.renderer import generate_cli_command
+from gpstitch.services.runtime_settings import runtime_settings_service
 
 # Apply runtime patches if enabled
 if settings.enable_gopro_patches:
@@ -29,26 +32,171 @@ class RenderService:
     """Handles video rendering as background subprocess."""
 
     def __init__(self):
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._active_job_ids: set[str] = set()
+        self._runner_tasks: set[asyncio.Task] = set()
+        self._concurrency = runtime_settings_service.get_render_concurrency(settings.render_concurrency)
+        self._shutdown_after_all_tasks_armed = False
+        # Compatibility fields for older single-render tests/callers.
         self._process: asyncio.subprocess.Process | None = None
         self._current_job_id: str | None = None
         self._lock = asyncio.Lock()
 
-    async def _kill_process_tree(self):
-        """Kill the current process and all its children (ffmpeg, etc.)."""
-        if not self._process:
+    @property
+    def concurrency(self) -> int:
+        """Configured max number of simultaneous render jobs."""
+        return self._concurrency
+
+    async def set_concurrency(self, value: int) -> int:
+        """Set max render concurrency and kick the pending queue."""
+        value = runtime_settings_service.set_render_concurrency(value)
+        async with self._lock:
+            self._concurrency = value
+        await self.kick_queue()
+        return value
+
+    def _sync_compat_unlocked(self) -> None:
+        """Refresh single-job compatibility fields."""
+        active_ids = [job_id for job_id in self._active_job_ids if job_id in self._processes or job_id]
+        self._current_job_id = active_ids[0] if active_ids else None
+        self._process = self._processes.get(self._current_job_id) if self._current_job_id else None
+
+    def is_job_active(self, job_id: str) -> bool:
+        """Return whether a job has a reserved or running render slot."""
+        return job_id in self._active_job_ids or job_id in self._processes
+
+    @staticmethod
+    def _file_type_for_path(file_path: str) -> str:
+        suffix = Path(file_path).suffix.lower()
+        return {
+            ".mp4": "video",
+            ".mov": "video",
+            ".gpx": "gpx",
+            ".fit": "fit",
+            ".srt": "srt",
+        }.get(suffix, "video")
+
+    @staticmethod
+    def _same_path(left: str | None, right: str | None) -> bool:
+        if not left or not right:
+            return False
+        return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+    def _recover_session_files_from_command_logs(self, config: RenderJobConfig, log_lines: list[str]) -> list[FileInfo]:
+        """Recover local session files from persisted command logs for pre-fix jobs."""
+        primary_path = None
+        secondary_path = None
+
+        for line in reversed(log_lines):
+            if "--gpx" not in line and "gopro_dashboard" not in line and "gpstitch-dashboard" not in line:
+                continue
+            try:
+                parts = shlex.split(line)
+            except ValueError:
+                continue
+
+            for index, part in enumerate(parts[:-1]):
+                if self._same_path(parts[index + 1], config.output_file):
+                    primary_path = part
+                    break
+
+            if "--gpx" in parts:
+                gpx_index = parts.index("--gpx")
+                if gpx_index + 1 < len(parts):
+                    secondary_path = parts[gpx_index + 1]
+
+            if primary_path:
+                break
+
+        if not primary_path:
+            output_path = Path(config.output_file)
+            if output_path.stem.endswith("_overlay"):
+                source_stem = output_path.stem[: -len("_overlay")]
+                for suffix in (".MP4", ".mp4", ".MOV", ".mov"):
+                    candidate = output_path.with_name(f"{source_stem}{suffix}")
+                    if candidate.exists():
+                        primary_path = str(candidate)
+                        break
+
+        if not primary_path:
+            return []
+
+        files = [
+            FileInfo(
+                filename=Path(primary_path).name,
+                file_path=primary_path,
+                file_type=self._file_type_for_path(primary_path),
+                role=FileRole.PRIMARY,
+            )
+        ]
+        if secondary_path and not self._same_path(primary_path, secondary_path):
+            files.append(
+                FileInfo(
+                    filename=Path(secondary_path).name,
+                    file_path=secondary_path,
+                    file_type=self._file_type_for_path(secondary_path),
+                    role=FileRole.SECONDARY,
+                )
+            )
+        return files
+
+    async def _restore_local_session_files_for_job(self, job_id: str, config: RenderJobConfig) -> bool:
+        """Restore local session file metadata for retries after server restart."""
+        from gpstitch.services.file_manager import file_manager
+
+        if not file_manager.is_local_session(config.session_id):
+            return True
+        if file_manager.get_files(config.session_id):
+            return True
+
+        job = await job_manager.get_job(job_id)
+        if not job:
+            return False
+
+        files = list(job.session_files)
+        if not files:
+            files = self._recover_session_files_from_command_logs(config, job.log_lines)
+            if files:
+                await job_manager.set_job_session_files(job_id, files)
+
+        primary = next((file for file in files if file.role == FileRole.PRIMARY), None)
+        if not primary or not Path(primary.file_path).exists():
+            return False
+
+        file_manager.restore_local_session(config.session_id, files)
+        await job_manager.append_job_log(job_id, "Restored local session files for retry")
+        return True
+
+    async def _kill_process_tree(self, process: asyncio.subprocess.Process | None = None):
+        """Kill a render process and all its children (ffmpeg, etc.)."""
+        process = process or self._process
+        if not process:
             return
-        pid = self._process.pid
+        pid = process.pid
         try:
             if sys.platform != "win32":
                 # Kill entire process group on Unix
                 os.killpg(pid, signal.SIGKILL)
             else:
-                self._process.kill()
-            await self._process.wait()
+                taskkill = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await taskkill.wait()
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            await process.wait()
         except ProcessLookupError:
             pass  # Process already dead
         except Exception:
-            pass
+            with contextlib.suppress(Exception):
+                process.kill()
+                await process.wait()
 
     @staticmethod
     def _get_gpx_start_timestamp(gpx_path: str) -> float | None:
@@ -102,6 +250,10 @@ class RenderService:
             logger.warning(f"Failed to parse SRT start time from {srt_path}: {e}")
         return None
 
+    @staticmethod
+    def _format_alignment_timestamp(timestamp: float) -> str:
+        return datetime.fromtimestamp(timestamp, UTC).isoformat()
+
     def _resolve_mtime_for_alignment(self, config: RenderJobConfig, video_path: str) -> float | None:
         """Resolve the target mtime for time alignment modes.
 
@@ -151,30 +303,40 @@ class RenderService:
                 logger.warning("Failed to extract DJI meta GPS timestamp for mtime alignment")
 
         if config.video_time_alignment in ("auto", "manual") and not is_srt:
-            from gpstitch.services.renderer import _extract_creation_time, _validate_creation_time
+            from gpstitch.services.renderer import (
+                _extract_creation_time,
+                _resolve_dji_filename_start_time,
+                _validate_creation_time,
+            )
 
-            creation_time = _extract_creation_time(Path(video_path))
-            if creation_time is not None:
-                # Cross-validate creation_time against GPS data.
-                # Some cameras (Insta360, DJI) store creation_time in local time
-                # but ffprobe reports it as UTC — detect and correct via mtime.
-                gps_path = Path(secondary.file_path) if secondary and secondary.file_type in ("gpx", "fit") else None
-                video_duration_sec = 0.0
-                try:
-                    from gopro_overlay.ffmpeg import FFMPEG
-                    from gopro_overlay.ffmpeg_gopro import FFMPEGGoPro
+            gps_path = Path(secondary.file_path) if secondary and secondary.file_type in ("gpx", "fit") else None
+            video_duration_sec = 0.0
+            try:
+                from gopro_overlay.ffmpeg import FFMPEG
+                from gopro_overlay.ffmpeg_gopro import FFMPEGGoPro
 
-                    recording = FFMPEGGoPro(FFMPEG()).find_recording(Path(video_path))
-                    video_duration_sec = recording.video.duration.millis() / 1000.0
-                except Exception as e:
-                    logger.warning("Failed to get video duration for creation_time validation: %s", e)
-                result = _validate_creation_time(Path(video_path), creation_time, video_duration_sec, gps_path)
-                ts = result.time.timestamp()
+                recording = FFMPEGGoPro(FFMPEG()).find_recording(Path(video_path))
+                video_duration_sec = recording.video.duration.millis() / 1000.0
+            except Exception as e:
+                logger.warning("Failed to get video duration for creation_time validation: %s", e)
+
+            dji_start = _resolve_dji_filename_start_time(Path(video_path), video_duration_sec, gps_path)
+            if dji_start is not None:
+                logger.info("Using DJI filename start time for render mtime alignment: %s", dji_start.isoformat())
+                ts = dji_start.timestamp()
             else:
-                from gopro_overlay.ffmpeg_gopro import filestat
+                creation_time = _extract_creation_time(Path(video_path))
+                if creation_time is not None:
+                    # Cross-validate creation_time against GPS data.
+                    # Some cameras (Insta360, DJI) store creation_time in local time
+                    # but ffprobe reports it as UTC — detect and correct via mtime.
+                    result = _validate_creation_time(Path(video_path), creation_time, video_duration_sec, gps_path)
+                    ts = result.time.timestamp()
+                else:
+                    from gopro_overlay.ffmpeg_gopro import filestat
 
-                fstat = filestat(Path(video_path))
-                ts = fstat.ctime.timestamp()
+                    fstat = filestat(Path(video_path))
+                    ts = fstat.ctime.timestamp()
 
             if config.video_time_alignment == "manual" and config.time_offset_seconds:
                 ts += config.time_offset_seconds
@@ -316,20 +478,63 @@ class RenderService:
     async def start_render(self, job_id: str, config: RenderJobConfig):
         """Start rendering process for a job."""
 
-        # Check if already rendering (with lock for race safety)
+        # Claim a concurrency slot. The job can remain PENDING during warmup,
+        # but the reserved slot prevents another worker from starting too many
+        # subprocesses.
         async with self._lock:
-            if self._current_job_id is not None and self._current_job_id != job_id:
-                logger.warning(f"Cannot start job {job_id}: another job is running ({self._current_job_id})")
+            get_job = getattr(job_manager, "get_job", None)
+            if get_job:
+                job = await get_job(job_id)
+                if job and job.status == JobStatus.CANCELLED:
+                    logger.info(f"Skipping cancelled render job {job_id}")
+                    self._active_job_ids.discard(job_id)
+                    self._processes.pop(job_id, None)
+                    self._sync_compat_unlocked()
+                    return
+
+            if job_id not in self._active_job_ids and len(self._active_job_ids) >= self._concurrency:
+                logger.info("Render concurrency is full; job %s remains pending", job_id)
                 return
-            # Claim the slot (or confirm already pre-claimed by _start_next_pending_job)
-            self._current_job_id = job_id
+
+            self._active_job_ids.add(job_id)
+            self._sync_compat_unlocked()
 
         # Helper to clear current job on early failure
         async def _clear_current_job():
             async with self._lock:
-                self._process = None
-                self._current_job_id = None
+                self._active_job_ids.discard(job_id)
+                self._processes.pop(job_id, None)
+                self._sync_compat_unlocked()
             await self._start_next_pending_job()
+            await self._maybe_shutdown_after_all_tasks()
+
+        async def _job_was_cancelled() -> bool:
+            get_job = getattr(job_manager, "get_job", None)
+            if not get_job:
+                return False
+            job = await get_job(job_id)
+            return bool(job and job.status == JobStatus.CANCELLED)
+
+        async def _stop_if_cancelled() -> bool:
+            if await _job_was_cancelled():
+                logger.info(f"Stopping cancelled render job {job_id} before process start")
+                await _clear_current_job()
+                return True
+            return False
+
+        if await _stop_if_cancelled():
+            return
+
+        if not await self._restore_local_session_files_for_job(job_id, config):
+            error = (
+                "Local session files are no longer available for this job. "
+                "Select the source files again or start a new batch render."
+            )
+            await job_manager.append_job_log(job_id, f"ERROR: {error}")
+            await job_manager.update_job_status(job_id, JobStatus.FAILED, error)
+            logger.error("Cannot restore local session files for job %s", job_id)
+            await _clear_current_job()
+            return
 
         # Generate CLI command
         from gpstitch.services.amap_settings import amap_settings_service, is_amap_style
@@ -341,12 +546,12 @@ class RenderService:
             if not amap_runtime.configured or not amap_runtime.validated:
                 error = "AMap credentials must be configured and validated before video rendering."
                 await job_manager.append_job_log(job_id, f"ERROR: {error}")
-                await job_manager.update_job_status(job_id, JobStatus.FAILED, error)
+                await self._retry_or_fail_job(job_id, error)
                 await _clear_current_job()
                 return
             await job_manager.append_job_log(
                 job_id,
-                "INFO: AMap JSAPI video rendering enabled for map widgets.",
+                f"INFO: AMap JSAPI video rendering enabled for map widgets (style: {config.map_style}).",
             )
 
         try:
@@ -362,17 +567,19 @@ class RenderService:
                 map_style=command_map_style,
                 gpx_merge_mode=config.gpx_merge_mode,
                 video_time_alignment=config.video_time_alignment,
+                time_offset_seconds=config.time_offset_seconds,
                 ffmpeg_profile=config.ffmpeg_profile,
                 gps_dop_max=config.gps_dop_max,
                 gps_speed_max=config.gps_speed_max,
                 odo_offset=config.odo_offset,
                 language=config.language,
                 amap_render=amap_render,
+                amap_map_style=config.map_style if amap_render else None,
             )
         except Exception as e:
             error_msg = f"Failed to generate command: {e}"
             await job_manager.append_job_log(job_id, f"ERROR: {error_msg}")
-            await job_manager.update_job_status(job_id, JobStatus.FAILED, error_msg)
+            await self._retry_or_fail_job(job_id, error_msg)
             logger.error(f"Failed to generate command for job {job_id}: {e}")
             await _clear_current_job()
             return
@@ -392,7 +599,7 @@ class RenderService:
 
         if needs_cairo and not is_pycairo_available():
             error = PYCAIRO_INSTALL_HINT
-            await job_manager.update_job_status(job_id, JobStatus.FAILED, error)
+            await self._retry_or_fail_job(job_id, error)
             logger.error(f"Job {job_id}: pycairo not available for cairo layout '{layout_name}'")
             await _clear_current_job()
             return
@@ -403,7 +610,7 @@ class RenderService:
         gopro_dashboard = self._find_gopro_dashboard()
         if not gopro_dashboard:
             error = "gopro-dashboard.py not found"
-            await job_manager.update_job_status(job_id, JobStatus.FAILED, error)
+            await self._retry_or_fail_job(job_id, error)
             logger.error(f"Job {job_id}: {error}")
             await _clear_current_job()
             return
@@ -431,6 +638,8 @@ class RenderService:
             pillarbox_info = self._needs_pillarbox(primary.file_path, config)
             if pillarbox_info:
                 canvas_w, canvas_h, video_w, video_h = pillarbox_info
+                if await _stop_if_cancelled():
+                    return
                 await job_manager.update_job_status(job_id, JobStatus.RUNNING)
                 pillarbox_temp_file = await self._create_pillarboxed_video(
                     primary.file_path, canvas_w, canvas_h, video_w, video_h, job_id
@@ -443,7 +652,7 @@ class RenderService:
                         os.utime(pillarbox_temp_file, (target_ts, target_ts))
                         await job_manager.append_job_log(
                             job_id,
-                            "Set pillarbox file mtime for time alignment",
+                            f"Set pillarbox file mtime for time alignment: {self._format_alignment_timestamp(target_ts)}",
                         )
                     # Replace video path in command with pillarboxed version
                     command = command.replace(shlex.quote(primary.file_path), shlex.quote(pillarbox_temp_file))
@@ -457,7 +666,7 @@ class RenderService:
                     restore_mtime_info = (primary.file_path, original_stat.st_atime, original_stat.st_mtime)
                     await job_manager.append_job_log(
                         job_id,
-                        "Set video file mtime for time alignment",
+                        f"Set video file mtime for time alignment: {self._format_alignment_timestamp(target_ts)}",
                     )
 
         # Parse command into args
@@ -466,7 +675,7 @@ class RenderService:
             # Replace script name with full path
             args[0] = str(gopro_dashboard)
         except Exception as e:
-            await job_manager.update_job_status(job_id, JobStatus.FAILED, f"Failed to parse command: {e}")
+            await self._retry_or_fail_job(job_id, f"Failed to parse command: {e}")
             if restore_mtime_info:
                 path, atime, mtime = restore_mtime_info
                 with contextlib.suppress(OSError):
@@ -480,6 +689,8 @@ class RenderService:
         logger.info(f"Generated command: {command}")
         logger.info(f"Parsed args: {args}")
 
+        if await _stop_if_cancelled():
+            return
         await job_manager.update_job_status(job_id, JobStatus.RUNNING)
 
         # Log the command to job logs for UI visibility
@@ -489,9 +700,12 @@ class RenderService:
         await job_manager.append_job_log(job_id, "=== Output ===")
 
         try:
+            if await _stop_if_cancelled():
+                return
+
             # Start subprocess in new session (Unix) to enable killing entire process group
             # This ensures child processes (ffmpeg) are also terminated on cancel
-            self._process = await asyncio.create_subprocess_exec(
+            process = await asyncio.create_subprocess_exec(
                 sys.executable,
                 *args,
                 stdout=asyncio.subprocess.PIPE,
@@ -499,15 +713,27 @@ class RenderService:
                 env=self._get_process_env(),
                 start_new_session=True,
             )
+            async with self._lock:
+                self._processes[job_id] = process
+                self._sync_compat_unlocked()
+            if await _job_was_cancelled():
+                await self._kill_process_tree(process)
+                logger.info("Killed process for job %s after pre-start cancellation", job_id)
+                return
 
-            await job_manager.set_job_pid(job_id, self._process.pid)
-            logger.info(f"Job {job_id} started with PID {self._process.pid}")
+            await job_manager.set_job_pid(job_id, process.pid)
+            logger.info(f"Job {job_id} started with PID {process.pid}")
 
             # Stream output and parse progress
-            await self._stream_output(job_id)
+            await self._stream_output(job_id, process)
 
             # Wait for completion
-            returncode = await self._process.wait()
+            returncode = await process.wait()
+            get_job = getattr(job_manager, "get_job", None)
+            job_after_wait = await get_job(job_id) if get_job else None
+            if job_after_wait and job_after_wait.status == JobStatus.CANCELLED:
+                logger.info("Job %s process exited after cancellation", job_id)
+                return
 
             if returncode == 0:
                 await job_manager.update_job_status(job_id, JobStatus.COMPLETED)
@@ -537,21 +763,19 @@ class RenderService:
                             break
                 tail = ": " + " | ".join(last_lines) if last_lines else ""
                 error = f"Process exited with code {returncode}{tail}"
-                await job_manager.append_job_log(job_id, "\n=== Failed ===")
-                await job_manager.append_job_log(job_id, error)
-                await job_manager.update_job_status(job_id, JobStatus.FAILED, error)
+                await self._retry_or_fail_job(job_id, error)
                 logger.error(f"Job {job_id} failed: {error}")
 
         except asyncio.CancelledError:
             # Kill the subprocess and all children before marking as cancelled
-            await self._kill_process_tree()
+            await self._kill_process_tree(self._processes.get(job_id))
             await job_manager.update_job_status(job_id, JobStatus.CANCELLED)
             logger.info(f"Job {job_id} cancelled")
             raise
         except Exception as e:
             # Kill subprocess and all children on error
-            await self._kill_process_tree()
-            await job_manager.update_job_status(job_id, JobStatus.FAILED, str(e))
+            await self._kill_process_tree(self._processes.get(job_id))
+            await self._retry_or_fail_job(job_id, str(e))
             logger.exception(f"Job {job_id} failed with exception")
         finally:
             # Restore original mtime if we changed it
@@ -565,10 +789,12 @@ class RenderService:
             for temp_gpx in srt_gpx_temp_files:
                 self._cleanup_temp_file(temp_gpx)
             async with self._lock:
-                self._process = None
-                self._current_job_id = None
+                self._active_job_ids.discard(job_id)
+                self._processes.pop(job_id, None)
+                self._sync_compat_unlocked()
             # Auto-start next pending job if exists (for batch processing)
             await self._start_next_pending_job()
+            await self._maybe_shutdown_after_all_tasks()
 
     async def _warm_map_cache_for_job(self, job_id: str, config: RenderJobConfig) -> None:
         """Best-effort map cache warmup immediately before the render subprocess starts."""
@@ -600,27 +826,100 @@ class RenderService:
             logger.warning("Map cache warmup before render failed for job %s: %s", job_id, e)
             await job_manager.append_job_log(job_id, f"Map cache warmup skipped: {e}")
 
+    async def arm_shutdown_after_all_tasks(self) -> bool:
+        """Arm global shutdown when the task-manager switch is on and work is active."""
+        if not runtime_settings_service.get_shutdown_after_all_tasks(False):
+            self._shutdown_after_all_tasks_armed = False
+            return False
+        if await self._has_unfinished_jobs():
+            self._shutdown_after_all_tasks_armed = True
+            return True
+        return False
+
+    async def _has_unfinished_jobs(self) -> bool:
+        """Return whether the queue still contains pending or running work."""
+        has_unfinished_jobs = getattr(job_manager, "has_unfinished_jobs", None)
+        if has_unfinished_jobs:
+            return bool(await has_unfinished_jobs())
+
+        has_pending_jobs = getattr(job_manager, "has_pending_jobs", None)
+        if has_pending_jobs and await has_pending_jobs():
+            return True
+
+        has_active_job = getattr(job_manager, "has_active_job", None)
+        if has_active_job and await has_active_job():
+            return True
+
+        return False
+
+    async def _maybe_shutdown_after_all_tasks(self) -> None:
+        """Schedule host shutdown once the global render queue has drained."""
+        if not runtime_settings_service.get_shutdown_after_all_tasks(False):
+            self._shutdown_after_all_tasks_armed = False
+            return
+
+        if await self._has_unfinished_jobs():
+            self._shutdown_after_all_tasks_armed = True
+            return
+
+        if not self._shutdown_after_all_tasks_armed:
+            return
+
+        self._shutdown_after_all_tasks_armed = False
+        result = await power_service.schedule_shutdown_once(
+            "all-render-tasks",
+            comment="GPStitch render tasks completed.",
+        )
+        get_latest_job = getattr(job_manager, "get_latest_job", None)
+        latest_job = await get_latest_job() if get_latest_job else None
+        if latest_job:
+            await job_manager.append_job_log(latest_job.id, result.message)
+
+    async def _retry_or_fail_job(self, job_id: str, error: str) -> bool:
+        """Requeue a failed attempt when possible; otherwise mark the job failed."""
+        reset_for_retry = getattr(job_manager, "reset_job_for_retry", None)
+        if reset_for_retry and await reset_for_retry(job_id, error):
+            return True
+
+        await job_manager.append_job_log(job_id, "\n=== Failed ===")
+        await job_manager.append_job_log(job_id, error)
+        await job_manager.update_job_status(job_id, JobStatus.FAILED, error)
+        return False
+
+    async def kick_queue(self):
+        """Public entrypoint to fill available render slots from the pending queue."""
+        await self.arm_shutdown_after_all_tasks()
+        await self._start_next_pending_job()
+        await self._maybe_shutdown_after_all_tasks()
+
     async def _start_next_pending_job(self):
-        """Start the next pending job in queue if exists (with lock protection)."""
-        next_job = None
+        """Start pending jobs until render concurrency is full."""
+        next_jobs = []
         async with self._lock:
-            # Double-check no job is running before starting next
-            if self._current_job_id is not None:
+            capacity = self._concurrency - len(self._active_job_ids)
+            if capacity <= 0:
                 return
-            next_job = await job_manager.get_next_pending_job()
-            if next_job:
-                logger.info(f"Auto-starting next pending job: {next_job.id}")
-                # Set current job ID immediately to prevent races
-                self._current_job_id = next_job.id
+            get_next_pending_jobs = getattr(job_manager, "get_next_pending_jobs", None)
+            if get_next_pending_jobs:
+                candidates = await get_next_pending_jobs(capacity + len(self._active_job_ids))
+                next_jobs = [job for job in candidates if job.id not in self._active_job_ids][:capacity]
+            else:
+                next_job = await job_manager.get_next_pending_job()
+                next_jobs = [next_job] if next_job and next_job.id not in self._active_job_ids else []
+            for job in next_jobs:
+                self._active_job_ids.add(job.id)
+            self._sync_compat_unlocked()
 
-        # Start render outside of lock (but we've claimed the slot)
-        if next_job:
-            # Don't use create_task - run synchronously to properly await
-            await self.start_render(next_job.id, next_job.config)
+        for job in next_jobs:
+            logger.info("Auto-starting pending render job: %s", job.id)
+            task = asyncio.create_task(self.start_render(job.id, job.config))
+            self._runner_tasks.add(task)
+            task.add_done_callback(self._runner_tasks.discard)
 
-    async def _stream_output(self, job_id: str):
+    async def _stream_output(self, job_id: str, process: asyncio.subprocess.Process | None = None):
         """Stream subprocess output and parse progress."""
-        if not self._process or not self._process.stdout:
+        process = process or self._processes.get(job_id) or self._process
+        if not process or not process.stdout:
             return
 
         # Full pattern for gopro-dashboard.py output:
@@ -644,7 +943,7 @@ class RenderService:
 
         total_frames = None
 
-        async for line in self._process.stdout:
+        async for line in process.stdout:
             line_str = line.decode("utf-8", errors="replace").strip()
             if not line_str:
                 continue
@@ -758,15 +1057,24 @@ class RenderService:
 
     async def cancel_render(self, job_id: str) -> bool:
         """Cancel a running render job."""
-        if self._current_job_id != job_id:
-            logger.warning(f"Cannot cancel job {job_id}: not the current job")
-            return False
-
-        if not self._process:
+        process = self._processes.get(job_id)
+        if not process and self._current_job_id == job_id:
+            process = self._process
+        if not process:
+            if job_id in self._active_job_ids:
+                logger.info("Marking active render job %s as cancelled before process start", job_id)
+                await job_manager.update_job_status(job_id, JobStatus.CANCELLED)
+                async with self._lock:
+                    self._active_job_ids.discard(job_id)
+                    self._processes.pop(job_id, None)
+                    self._sync_compat_unlocked()
+                await self._start_next_pending_job()
+                await self._maybe_shutdown_after_all_tasks()
+                return True
             logger.warning(f"Cannot cancel job {job_id}: no process running")
             return False
 
-        pid = self._process.pid
+        pid = process.pid
         logger.info(f"Cancelling job {job_id} (PID {pid})")
 
         try:
@@ -781,7 +1089,7 @@ class RenderService:
 
             # Wait up to 5 seconds for graceful termination
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
                 # Force kill the entire process group
                 logger.warning(f"Force killing job {job_id}")
@@ -789,15 +1097,27 @@ class RenderService:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(pid, signal.SIGKILL)
                 else:
-                    self._process.kill()
-                await self._process.wait()
+                    await self._kill_process_tree(process)
+                await process.wait()
 
             await job_manager.update_job_status(job_id, JobStatus.CANCELLED)
+            async with self._lock:
+                self._active_job_ids.discard(job_id)
+                self._processes.pop(job_id, None)
+                self._sync_compat_unlocked()
+            await self._start_next_pending_job()
+            await self._maybe_shutdown_after_all_tasks()
             return True
 
         except ProcessLookupError:
             # Process already dead
             logger.info(f"Job {job_id} process already terminated")
+            async with self._lock:
+                self._active_job_ids.discard(job_id)
+                self._processes.pop(job_id, None)
+                self._sync_compat_unlocked()
+            await self._start_next_pending_job()
+            await self._maybe_shutdown_after_all_tasks()
             return True
         except Exception:
             logger.exception(f"Error cancelling job {job_id}")

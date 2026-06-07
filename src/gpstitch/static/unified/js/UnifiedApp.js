@@ -230,7 +230,11 @@ class UnifiedApp {
 
     _isAmapStyle(styleName) {
         const style = this._mapStyles?.find(s => s.name === styleName);
-        return style?.provider === 'amap' || styleName === 'amap-jsapi' || styleName === 'amap';
+        return style?.provider === 'amap'
+            || styleName === 'amap-jsapi'
+            || styleName === 'amap-jsapi-satellite'
+            || styleName === 'amap-jsapi-mixed'
+            || styleName === 'amap';
     }
 
     async _loadAmapSettings() {
@@ -431,6 +435,10 @@ class UnifiedApp {
 
         // Batch Render Modal
         this.batchRenderModal = new BatchRenderModal(this.state);
+
+        // Task Manager Page
+        this.taskManagerPage = new TaskManagerPage(this.state);
+        window.taskManagerPage = this.taskManagerPage;
     }
 
     /**
@@ -703,6 +711,12 @@ class UnifiedApp {
         const renderBtn = document.getElementById('btn-render');
         if (renderBtn) {
             renderBtn.addEventListener('click', () => this._handleRenderClick());
+        }
+
+        // Task manager button
+        const taskManagerBtn = document.getElementById('btn-task-manager');
+        if (taskManagerBtn) {
+            taskManagerBtn.addEventListener('click', () => this.taskManagerPage.open());
         }
 
         // Batch render button
@@ -1079,7 +1093,8 @@ class UnifiedApp {
                     session_id: this.state.sessionId,
                     layout: typeof config.layout === 'string' ? config.layout : this.state.quickConfig.layout,
                     frame_time_ms: Math.round(config.frameTimeMs || 0),
-                    language: config.language || this.state.language || 'zh-CN'
+                    language: config.language || this.state.language || 'zh-CN',
+                    map_style: config.mapStyle || this.state.quickConfig.mapStyle || 'amap-jsapi'
                 }),
                 signal
             });
@@ -1100,6 +1115,7 @@ class UnifiedApp {
                 runtimeConfig,
                 context,
                 imageMetrics,
+                mapStyle: config.mapStyle || this.state.quickConfig.mapStyle || 'amap-jsapi',
                 frameTimeMs: config.frameTimeMs || 0,
                 durationMs: this.state.duration || 0,
             });

@@ -15,6 +15,7 @@ from gpstitch.constants import (
     DEFAULT_UNITS_SPEED,
     DEFAULT_UNITS_TEMPERATURE,
 )
+from gpstitch.models.schemas import FileInfo
 
 
 class JobStatus(str, Enum):
@@ -95,6 +96,9 @@ class Job(BaseModel):
     error: str | None = None
     pid: int | None = None
     batch_id: str | None = None  # Groups jobs from same batch
+    session_files: list[FileInfo] = Field(default_factory=list)  # Local/upload session files needed for retry
+    retry_count: int = Field(default=0, ge=0)  # Number of retry attempts already queued
+    max_retries: int = Field(default=3, ge=0)  # Retry attempts allowed after the first failure
 
     def is_terminal(self) -> bool:
         """Check if job is in a terminal state."""

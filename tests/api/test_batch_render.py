@@ -1,10 +1,13 @@
 """Tests for batch render with shared GPX support."""
 
-from unittest.mock import patch
+import asyncio
+import threading
+import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gpstitch.api.render import BatchFileInput, BatchRenderRequest
+from gpstitch.api.render import BatchFileInput, BatchRenderRequest, PreCheckFileInput, PreCheckRequest
 
 
 class TestBatchRenderRequestModel:
@@ -45,6 +48,12 @@ class TestBatchRenderRequestModel:
         assert req.files[1].gpx_path is None
         assert req.shared_gpx_path == "/tmp/shared.gpx"
 
+    def test_pre_check_accepts_large_directory_batches(self):
+        req = PreCheckRequest(
+            files=[PreCheckFileInput(video_path=f"/tmp/video_{index}.mp4") for index in range(221)]
+        )
+
+        assert len(req.files) == 221
 
 class TestBatchRenderSharedGpx:
     """Tests for start_batch_render endpoint with shared_gpx_path."""
@@ -178,6 +187,113 @@ class TestBatchRenderSharedGpx:
         for job_id in data["job_ids"]:
             job = await job_manager.get_job(job_id)
             assert job.config.map_style == "amap-jsapi"
+
+    @pytest.mark.anyio
+    async def test_amap_satellite_map_style_applied_to_batch_jobs(self, async_client, batch_video_files):
+        """Batch render jobs should retain AMap satellite style for JSAPI rendering."""
+        response = await async_client.post(
+            "/api/render/batch",
+            json={
+                "files": [{"video_path": str(v)} for v in batch_video_files],
+                "map_style": "amap-jsapi-satellite",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_jobs"] == 3
+
+        from gpstitch.services.job_manager import job_manager
+
+        for job_id in data["job_ids"]:
+            job = await job_manager.get_job(job_id)
+            assert job.config.map_style == "amap-jsapi-satellite"
+
+    async def test_batch_render_does_not_block_task_manager_list(self, async_client, temp_dir, monkeypatch):
+        """Task manager job listing should respond while batch metadata is still being read."""
+        from gpstitch.api import render as render_api
+
+        videos = []
+        for i in range(2):
+            path = temp_dir / f"video_{i}.mp4"
+            path.write_bytes(b"fake video")
+            videos.append(path)
+
+        sleep_started = threading.Event()
+        calls = 0
+
+        def fake_extract_video_metadata(_path):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                sleep_started.set()
+                time.sleep(0.3)
+            return None
+
+        monkeypatch.setattr(render_api, "extract_video_metadata", fake_extract_video_metadata)
+        monkeypatch.setattr(render_api.render_service, "kick_queue", AsyncMock())
+
+        batch_task = asyncio.create_task(
+            async_client.post(
+                "/api/render/batch",
+                json={"files": [{"video_path": str(video)} for video in videos]},
+            )
+        )
+
+        try:
+            assert await asyncio.to_thread(sleep_started.wait, 1.0)
+
+            jobs_response = await asyncio.wait_for(
+                async_client.get("/api/render/jobs?limit=100"),
+                timeout=1.0,
+            )
+
+            assert jobs_response.status_code == 200
+            jobs_data = jobs_response.json()
+            assert any(job["output_file"].endswith("video_0_overlay.mp4") for job in jobs_data["jobs"])
+
+            response = await batch_task
+            assert response.status_code == 200
+        finally:
+            if not batch_task.done():
+                batch_task.cancel()
+
+    async def test_batch_job_creation_uses_render_concurrency(self, async_client, temp_dir, monkeypatch):
+        """The task-manager concurrency setting limits batch job preparation too."""
+        from gpstitch.api import render as render_api
+
+        videos = []
+        for i in range(5):
+            path = temp_dir / f"video_{i}.mp4"
+            path.write_bytes(b"fake video")
+            videos.append(path)
+
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_extract_video_metadata(_path):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.1)
+            with lock:
+                active -= 1
+            return None
+
+        monkeypatch.setattr(render_api.render_service, "_concurrency", 2)
+        monkeypatch.setattr(render_api.render_service, "kick_queue", AsyncMock())
+        monkeypatch.setattr(render_api, "extract_video_metadata", fake_extract_video_metadata)
+
+        response = await async_client.post(
+            "/api/render/batch",
+            json={"files": [{"video_path": str(video)} for video in videos]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["total_jobs"] == len(videos)
+        assert max_active == 2
 
     @pytest.mark.anyio
     async def test_shared_gpx_nonexistent_file(self, async_client, batch_video_files):

@@ -30,7 +30,7 @@ def _extract_timecode_from_input(ffmpeg_exe, input_path) -> str | None:
     Returns:
         Timecode string (HH:MM:SS:FF) or None if not found
     """
-    import json
+    from gpstitch.patches.ffmpeg_gopro_patches import loads_ffprobe_json
 
     try:
         # Use ffprobe to get video stream metadata
@@ -50,7 +50,7 @@ def _extract_timecode_from_input(ffmpeg_exe, input_path) -> str | None:
             .stdout
         )
 
-        ffprobe_json = json.loads(ffprobe_output)
+        ffprobe_json = loads_ffprobe_json(ffprobe_output)
         streams = ffprobe_json.get("streams", [])
 
         if streams:

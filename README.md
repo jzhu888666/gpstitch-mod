@@ -1,326 +1,143 @@
-# GPStitch
+# gpstitch-mod
 
-[![PyPI](https://img.shields.io/pypi/v/gpstitch)](https://pypi.org/project/gpstitch/)
-[![Downloads](https://img.shields.io/pypi/dm/gpstitch)](https://pypi.org/project/gpstitch/)
-[![GitHub release](https://img.shields.io/github/v/release/Romancha/GPStitch)](https://github.com/Romancha/GPStitch/releases)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+`gpstitch-mod` 是基于 GPStitch 的私人修改版，用于在 Windows 环境中批量制作带 GPS 轨迹、速度、地图和 DJI 相关信息的视频叠加层。
 
-A visual web interface for creating video overlays with GPS telemetry data. Wraps the
-powerful [gopro-overlay](https://github.com/time4tea/gopro-dashboard-overlay) library with an intuitive UI.
+本项目仍使用原来的 Python 包名和命令入口：
 
-## Features
+- Python 包名：`gpstitch`
+- Web 启动命令：`gpstitch`
+- 渲染包装命令：`gpstitch-dashboard`
 
-- **Quick Mode** — Select from predefined layouts, customize units and map styles
-- **Advanced Mode** — Visual drag-and-drop editor for creating custom overlay layouts
-- **Live Preview** — See your overlay in real-time as you configure it
-- **DJI Drone Support** — Automatic SRT telemetry parsing with timezone and time alignment auto-detection
-- **DJI Osmo Action Support** — Automatic detection of embedded GPS from DJI GPS Bluetooth Remote Controller (Action
-  4/5/6) — no secondary file needed
-- **Non-GoPro Video Support** — Use any video with external GPX/FIT/SRT files for GPS data
-- **Vertical Video Support** — Automatic rotation detection and correct overlay rendering
-- **GPS Quality Analysis** — Automatic signal quality check with warnings before rendering
-- **Template Management** — Save and load custom templates
-- **Batch Rendering** — Process multiple files with the same settings
-- **Shared GPX Batch Render** — Apply a single GPX track to multiple videos with automatic odometer offset per video
-- **Background Jobs** — Render videos in the background with progress tracking
-- **Overlay-Only Mode** — Render transparent telemetry overlays (no video) for compositing in Final Cut Pro, DaVinci
-  Resolve, etc.
+## 项目用途
 
-## Screenshots
+这个修改版主要面向以下场景：
 
-### Quick Mode
+- 多个视频目录批量渲染。
+- 一个 GPX/FIT 轨迹目录匹配多个视频目录。
+- 一个共享 GPX 应用于多段视频，并自动计算每段视频的里程偏移。
+- DJI 视频文件名时间、视频元数据时间、GPX 时间轴之间的稳定对齐。
+- Windows 中文路径、H 盘/NAS 路径和 ffprobe 输出兼容。
+- AMap 地图样式预览和最终视频渲染。
+- 后台任务队列、并发渲染、失败重试和批量取消。
 
-Simple configuration with predefined layouts. Perfect for quick renders.
+## 主要修改内容
 
-![Quick Mode](https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/quick_mode.jpg)
+### 任务管理
 
-### Advanced Mode
+- 新增独立任务管理页面/模块，用于统一查看所有渲染任务。
+- 支持渲染并发数配置，当前最多支持 3 个任务同时运行。
+- 支持选择任务、全选任务、批量取消、批量重试失败任务。
+- 支持清理已结束任务。
+- 支持失败任务手动重试，并在手动重试时重置自动重试次数。
+- 支持自动重试临时失败任务。
+- 将“渲染完成后关机”从快速模式和批量渲染弹窗迁移到任务管理模块。
+- 新的关机开关语义为：打开后，所有排队/运行中的渲染任务完成时执行关机。
+- 任务管理状态中显示等待中、运行中、已完成、失败、已取消数量。
 
-Full visual editor with drag-and-drop widgets. Create custom layouts with complete control.
+### 批量渲染
 
-![Advanced Mode](https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/advanced_mode.jpg)
+- 修复一次选择多个视频目录后重复弹出选择窗口的问题。
+- 修复一次选择多个 GPX 目录后重复弹出选择窗口的问题。
+- 支持选择多个视频目录并递归收集视频。
+- 支持选择 GPX/FIT 目录后，根据视频文件和轨迹文件自动匹配。
+- 修复多个视频目录 + 包含对应轨迹的 GPX 目录时，错误提示“找不到匹配 GPS 轨迹”的问题。
+- 保留共享 GPX 模式：一个 GPX 轨迹可应用到一个或多个视频。
+- 批量任务创建后会立即填满可用并发槽位，不再只启动一个任务。
+- 批量任务支持预检查输出文件冲突和 GPS 质量问题。
 
-### DJI Drone Support
+### 失败重试和任务恢复
 
-Use DJI drone videos with SRT telemetry files. Timezone offset and time alignment are automatically detected from video
-metadata, supporting different DJI models and firmware versions.
+- 渲染任务会持久化本地 session 文件快照，包括主视频和辅助 GPX/FIT/SRT 文件。
+- 服务重启后，失败任务或排队任务可根据持久化文件快照恢复本地 session。
+- 对较早创建、没有 session 快照的任务，尝试从历史命令日志中恢复视频和 GPX 路径。
+- 修复失败任务批量重试时，只有最先进入并发槽位的任务能运行，其余排队任务被误判为 orphaned job 的问题。
+- orphaned 清理现在会保留可恢复的本地任务，不再误杀仍可重试的 pending job。
 
-![DJI Drone Support](https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/dji_drone.jpg)
+### Windows 路径和 ffprobe JSON 兼容
 
-Camera metrics (ISO, shutter, f-number, EV, color temperature) from SRT files are displayed directly on the video
-overlay.
+- 修复 ffprobe 输出中 Windows 反斜杠路径导致的 `json.decoder.JSONDecodeError: Invalid \escape`。
+- 兼容中文路径、H 盘路径和被 Windows 默认编码影响后的混合转义路径。
+- gopro-overlay 的 `FFMPEGGoPro.find_recording()` 和相关 ffprobe JSON 解析会使用 GPStitch 的宽松 JSON loader。
+- 元数据读取、旋转检测、timecode 提取等路径也统一走兼容解析。
 
-![DJI Drone Overlay](https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/dji_drone_screen_from_video.jpg)
+### DJI 和 GPX 时间对齐
 
-### External GPX & Vertical Video
+- DJI 文件名中的 `DJI_YYYYMMDDHHMMSS` 时间优先参与视频开始时间判断。
+- 修复部分视频 `creation_time` 与真实录制时间冲突时的对齐问题。
+- GPX local-as-UTC 时间轴偏移会传递到预览、时间同步和最终渲染包装脚本。
+- 新增 wrapper 参数用于 GPX 时间偏移和共享 GPX 里程偏移。
+- 渲染前会根据视频时间和 GPX 轨迹计算共享 GPX 的里程起点。
 
-Use any video with external GPX/FIT files. Vertical videos are automatically detected and rendered correctly.
+### AMap 地图渲染
 
-![External GPX & Vertical Video](https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/external_gpx_vertical.jpg)
+- 支持 AMap JSAPI 地图用于预览和最终视频渲染。
+- 支持普通、卫星、混合等地图样式。
+- 针对不同地图组件区分底图/路网渲染逻辑。
+- 支持地图瓦片/截图缓存和渲染前预热。
+- 修复部分地图组件在最终视频中显示不一致的问题。
 
-### Batch Rendering
+### UI 和本地文件选择
 
-Process multiple videos at once with the same overlay settings.
+- 新增本地多目录选择接口。
+- 批量渲染弹窗显示视频目录、GPS 目录、视频数量和匹配到的 GPS 数量。
+- 任务管理 UI 增加复选框、全选、批量按钮和任务详情面板。
+- 增加中文界面文案和部分英文文案。
+- 快速模式和批量渲染中移除原来的单独关机开关，避免多个入口语义冲突。
 
-<p align="center">
-<img src="https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/batch_create.png" width="400" alt="Batch Create"/>
-<img src="https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/batch_progress.png" width="400" alt="Batch Progress"/>
-</p>
+### 测试和稳定性
 
-### Shared GPX Batch Render
+- 增加批量渲染、任务管理、失败重试、并发队列、session 恢复、AMap、GPX 时间偏移、Windows JSON 解析等测试。
+- API 测试隔离真实任务目录，避免测试任务写入用户的真实临时任务列表。
+- 增加对运行中任务、排队任务、失败任务、批量取消和批量重试的覆盖。
 
-Apply a single GPX track to multiple videos recorded during the same activity. Each video automatically gets an odometer
-offset calculated from its creation time relative to the GPX track start, so the overlay shows the correct absolute
-distance from the beginning of the track.
+## 安装和运行
 
-### Overlay-Only Mode
+### 前置要求
 
-Render telemetry overlays with a transparent background — without any source video. Use a GPX, FIT, or SRT file as the
-primary input, and GPStitch will generate a video with an alpha channel that you can layer on top of your footage in any
-video editor (Final Cut Pro, DaVinci Resolve, Premiere Pro, etc.).
-
-**How to use:**
-
-1. Upload a GPX, FIT, or SRT file as the primary file (no video needed)
-2. Configure your overlay layout and widgets as usual
-3. Select an encoding profile with transparency support:
-    - **MOV (PNG)** — Lossless quality, best compatibility with Final Cut Pro and DaVinci Resolve (large files)
-    - **VP9** — Good quality with alpha channel, smaller files
-    - **VP8** — Alpha channel support, widest browser compatibility
-4. Render — the output is a video with a transparent background ready for compositing
-
-## Command-Line Rendering
-
-GPStitch includes `gpstitch-dashboard`, a CLI command that works as a drop-in replacement for `gopro-dashboard.py` with
-all GPStitch patches applied (DJI support, timecode preservation, audio copy, etc.).
-
-Use the "Get Command" button in the UI to generate a ready-to-run `gpstitch-dashboard` command, then paste it into your
-terminal:
-
-```bash
-gpstitch-dashboard video.mp4 output.mp4 --layout xml --layout-xml layout.xml
-```
-
-This is useful for scripting, batch processing, or re-running renders without the UI.
-
-## Requirements
-
+- Windows 10/11 或其他支持 Python 3.12+ 的系统。
 - Python 3.12+
-- FFmpeg (must be installed and available in PATH)
-- [gopro-overlay](https://pypi.org/project/gopro-overlay/) (installed automatically)
+- FFmpeg 和 ffprobe，需要能在命令行中直接运行。
+- 项目根目录 `.venv` 是默认虚拟环境。
 
-## Installation
+### 使用本地虚拟环境
 
-### pipx (recommended)
-
-```bash
-# Install FFmpeg first
-# macOS:    brew install ffmpeg
-# Ubuntu:   sudo apt install ffmpeg
-# Windows:  choco install ffmpeg
-
-# Install GPStitch
-pipx install gpstitch
-
-# Run (opens browser automatically)
-gpstitch
-
-# Or with custom host/port
-gpstitch --host 127.0.0.1 --port 8080
+```powershell
+cd E:\github\GPStitch
+.\.venv\Scripts\python.exe -m uvicorn gpstitch.app:app --host 127.0.0.1 --port 8000
 ```
 
-#### Optional: Cairo widgets support
+启动后访问：
 
-Some layouts (e.g. `example`, `example-2`) use cairo-based widgets (gauges, circuit maps). These require `pycairo`,
-which needs the cairo system library:
-
-```bash
-# 1. Install system library
-# macOS:    brew install cairo pkg-config
-# Ubuntu:   sudo apt install libcairo2-dev pkg-config python3-dev
-
-# 2. Install with cairo support (new install)
-pipx install 'gpstitch[cairo]'
-
-# Or add to existing installation
-pipx inject gpstitch pycairo
+```text
+http://127.0.0.1:8000
 ```
 
-Without pycairo, GPStitch works normally — cairo layouts will be marked as unavailable in the UI.
+### 命令行渲染
 
-### From source
+Web 界面生成的命令会通过 `gpstitch-dashboard` 包装脚本执行。包装脚本会先应用 GPStitch 运行时补丁，再调用原始 `gopro-dashboard.py`。
 
-```bash
-# Install uv if not already installed
-curl -LsSf https://astral.sh/uv/install.sh | sh
+示例：
 
-# Clone the repository
-git clone https://github.com/Romancha/GPStitch.git
-cd gpstitch
-
-# Install dependencies
-uv sync
-
-# Run the application
-uv run gpstitch
+```powershell
+.\.venv\Scripts\gpstitch-dashboard.exe video.mp4 output.mp4 --layout xml --layout-xml layout.xml
 ```
 
-Then open http://localhost:8000 in your browser.
+## 常用测试
 
-### Supported Input Files
-
-| Type     | Formats                | Description                                                       |
-|----------|------------------------|-------------------------------------------------------------------|
-| Video    | `.mp4`, `.mov`, `.avi` | Video files (GoPro and DJI Action files may contain embedded GPS) |
-| GPS Data | `.gpx`, `.fit`, `.srt` | External GPS tracks — GPX, FIT, or DJI SRT telemetry (optional)   |
-
-## Time Sync
-
-When using a non-GoPro video with an external GPS file (GPX/FIT), the video and GPS track need to be aligned in time.
-GPStitch provides three synchronization modes in the **Time Sync** dropdown:
-
-### Auto (Recommended)
-
-Automatically aligns the video to the GPS track using the video's embedded `creation_time` metadata (set by the camera
-when recording starts). GPStitch extracts this timestamp via ffprobe and cross-validates it against the GPS track's time
-range.
-
-**Timezone auto-correction:** Some cameras (e.g., Insta360 Go 3S, certain action cameras) incorrectly write local time
-into the `creation_time` field instead of UTC as required by the MP4 specification. GPStitch detects this by checking
-whether the video time window overlaps with the GPS data. If it doesn't, GPStitch runs a cascade of correction
-strategies:
-
-1. **System timezone** — applies your machine's local timezone offset (e.g., PDT = UTC-7). Since GPStitch runs locally,
-   this is a strong signal that matches the recording timezone in most workflows.
-2. **Exhaustive search** — tries all valid whole-hour and fractional timezone offsets (e.g., UTC+5:45) and picks the one
-   that produces overlap with the GPS track. If only one candidate matches, it's used automatically.
-3. **File modification time** — as a last resort, checks whether the file's `mtime` happens to overlap the GPS range (
-   without any timezone shifting).
-
-If none of these strategies produce a valid alignment, GPStitch reports a failure and suggests a manual offset value.
-The UI shows a "Switch to Manual" button pre-filled with the best-guess offset so you can apply it with one click.
-
-When a correction is applied, an info banner shows which strategy was used (e.g., "Applied +7h from your system
-timezone"). If no `creation_time` is found in the video metadata, GPStitch uses the file's creation date (less reliable,
-shown as a warning).
-
-### Use GPX Timestamps
-
-Skips time alignment entirely. The GPS data is used as-is without synchronization with the video. This mode is useful
-when:
-
-- The GPX file has been manually trimmed to exactly match the video segment
-- You want the overlay to display the full GPS track regardless of video timing
-
-### Manual Offset
-
-Works the same as **Auto** (uses video metadata for alignment), but allows you to apply a manual correction in seconds (
-`+` or `-`). Use this when the automatic alignment is close but slightly off — for example, if the camera's clock was
-not perfectly synchronized with GPS time.
-
-The UI shows the base timestamp and the adjusted result so you can see exactly how the offset is applied.
-
-> **Note:** For DJI drones with SRT files, time synchronization is handled automatically — the Time Sync options are not
-> shown because GPStitch detects the correct alignment from the SRT telemetry data.
-
-## Configuration
-
-Environment variables (prefix: `GPSTITCH_`):
-
-| Variable               | Default                 | Description                              |
-|------------------------|-------------------------|------------------------------------------|
-| `HOST`                 | `0.0.0.0`               | Server host                              |
-| `PORT`                 | `8000`                  | Server port                              |
-| `LOCAL_MODE`           | `true`                  | Use local file paths instead of uploads  |
-| `TEMPLATES_DIR`        | `~/.gpstitch/templates` | Custom templates directory               |
-| `ENABLE_GOPRO_PATCHES` | `true`                  | Enable runtime patches for gopro-overlay |
-| `USE_WRAPPER_SCRIPT`   | `true`                  | Use wrapper script for rendering         |
-
-You can also use a `.env` file in the project root.
-
-## Runtime Patches
-
-GPStitch includes runtime patches for `gopro-overlay` that add:
-
-- **Timecode preservation** — Maintains original video timecode for Final Cut Pro compatibility
-- **Audio stream copy** — Preserves audio without re-encoding
-- **Metadata preservation** — Keeps original video metadata in output
-- **DJI camera metrics** — Extends overlay engine with ISO, shutter, f-number, EV, color temperature, and focal length
-  from DJI SRT files
-- **DJI Osmo Action GPS** — Loads embedded protobuf GPS telemetry from DJI Action cameras with GPS Bluetooth Remote
-  Controller
-- **Odometer offset** — Allows odometer to start from a custom offset value for shared GPX batch rendering
-
-Patches are applied automatically at startup. To disable:
-
-```bash
-export GPSTITCH_ENABLE_GOPRO_PATCHES=false
-export GPSTITCH_USE_WRAPPER_SCRIPT=false
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\unit\services\test_job_manager.py -q
+.\.venv\Scripts\python.exe -m pytest tests\api\test_render.py tests\api\test_batch_render.py -q
+.\.venv\Scripts\python.exe -m pytest tests\unit\services\test_render_service.py -q
+.\.venv\Scripts\python.exe -m pytest tests\unit\patches\test_patches.py -q
 ```
 
-## Development
+## 注意事项
 
-```bash
-# Install with dev dependencies
-uv sync --all-extras
+- 修改后如果已有 GPStitch 服务在运行，需要重启服务，新补丁才会生效。
+- 批量重试旧失败任务时，建议先确认任务详情中保存了原视频和 GPX/FIT 路径。
+- 若 Windows 中文路径显示成乱码但实际路径存在，渲染链路会尽量按真实路径恢复和解析。
+- 私有仓库名建议使用 `gpstitch-mod`，避免与上游 GPStitch 混淆。
 
-# Linting and formatting
-uv run ruff check src tests
-uv run ruff format src tests
+## 许可证
 
-# Run tests
-uv run pytest
-
-# Run all checks (lint + format + tests)
-uv run ruff check src tests && uv run ruff format src tests && uv run pytest
-
-# Run E2E tests (requires: uv run playwright install chromium)
-uv run pytest tests/e2e/ -v
-```
-
-### Project Structure
-
-```
-src/gpstitch/
-├── main.py          # CLI entry point
-├── app.py           # FastAPI application
-├── config.py        # Settings
-├── api/             # API routers
-├── models/          # Pydantic data models
-├── services/        # Business logic
-└── static/          # Frontend assets
-```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [gopro-dashboard-overlay](https://github.com/time4tea/gopro-dashboard-overlay) — The underlying overlay rendering
-  engine
-
-## Support
-
-If you find this project useful, consider supporting its development:
-
-| Method                 | Link                                         |
-|------------------------|----------------------------------------------|
-| 💳 Boosty              | https://boosty.to/romancha                   |
-| ₿ **Bitcoin on-chain** | `bc1qenxrgj6x9un0dpuy5245pgjculj6jqgzht8ned` |
-
-> Prefer scanning a QR code? See the [donation page](https://gpstitch.romancha.org/#support).
-
-Thank you! 🙏
+本项目基于 GPStitch 修改，继续遵循原项目的 GPL-3.0-or-later 许可证。详见 [LICENSE](LICENSE)。
