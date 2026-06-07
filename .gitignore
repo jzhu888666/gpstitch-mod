@@ -79,6 +79,7 @@ Desktop.ini
 
 # Project specific
 *.log
+.codex/
 .gpstitch/
 .gpstitch-cache/
 openspec/
