@@ -4,6 +4,9 @@
 
 Original project: [Romancha/GPStitch](https://github.com/Romancha/GPStitch)
 
+Releases: [GitHub Releases](https://github.com/jzhu888666/gpstitch-mod/releases)
+Current source version: `v0.17.0`
+
 `gpstitch-mod` is a private modified build of GPStitch for creating GPS telemetry video overlays on Windows. It focuses on batch rendering, task management, DJI/GPX time alignment, AMap rendering, and robust handling of Windows paths.
 
 The project keeps the original package and command names:

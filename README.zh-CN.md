@@ -4,6 +4,9 @@
 
 原始项目：[Romancha/GPStitch](https://github.com/Romancha/GPStitch)
 
+版本发布：[GitHub Releases](https://github.com/jzhu888666/gpstitch-mod/releases)
+当前源码版本：`v0.17.0`
+
 `gpstitch-mod` 是基于 GPStitch 的私人修改版，用于在 Windows 环境中批量制作带 GPS 轨迹、速度、地图和 DJI 相关信息的视频叠加层。
 
 本项目仍使用原来的 Python 包名和命令入口：
