@@ -78,7 +78,7 @@ DEFAULT_LAYOUT_TRANSLATIONS = {
 
 DEFAULT_OSD_BASE_WIDTH = 1920
 DEFAULT_OSD_SCALE_ATTR = "gpstitch_osd_scale"
-DEFAULT_OSD_SCALE_VERSION = "v9"
+DEFAULT_OSD_SCALE_VERSION = "v10"
 DEFAULT_OSD_TEXT_COMPONENT_TYPES = {"datetime", "metric", "metric_unit", "text"}
 DEFAULT_OSD_ICON_COMPONENT_TYPES = {"gps-lock-icon", "icon"}
 DEFAULT_OSD_UNSCALED_ROOT_NAMES = {"gps_info", "moving_map", "journey_map"}
@@ -452,7 +452,7 @@ def _configure_default_osd_datetime(root: ET.Element) -> None:
         component.set("format", format_string)
         component.set("size", "32")
         component.set("y", y)
-        component.set("timezone", "local")
+        component.set("timezone", "source")
         component.attrib.pop("truncate", None)
 
 

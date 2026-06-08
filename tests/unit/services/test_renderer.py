@@ -1780,8 +1780,8 @@ class TestLayoutCommandGeneration:
         layout_path = Path(m.group(1).strip("'\""))
         assert layout_path.exists(), "layout-xml path must exist on disk"
         layout_xml = layout_path.read_text(encoding="utf-8")
-        assert 'timezone="local"' in layout_xml
-        assert 'timezone="source"' not in layout_xml
+        assert 'timezone="source"' in layout_xml
+        assert 'timezone="local"' not in layout_xml
 
     def test_speed_awareness_layout_uses_layout_flag(self, mock_file_manager):
         """speed-awareness should generate --layout speed-awareness."""
